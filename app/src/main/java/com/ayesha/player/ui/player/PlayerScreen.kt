@@ -29,9 +29,13 @@ import com.ayesha.player.playback.PlayerUiState
 import com.ayesha.player.playback.RotationMode
 import com.ayesha.player.playback.engine.PlayerEngine
 import com.ayesha.player.ui.common.pick
+import com.ayesha.player.ui.navigation.Route
 import kotlinx.coroutines.launch
 
 private enum class PlayerSheet { None, Speed, Volume, Audio, Subtitles, Sleep }
+
+/** The overlay's open animation (360 ms) plus a frame. */
+private const val OPEN_SETTLE_MS = 400L
 
 /**
  * player_screen.dart.
@@ -40,7 +44,7 @@ private enum class PlayerSheet { None, Speed, Volume, Audio, Subtitles, Sleep }
  * position ticking several times a second recomposes the time, the slider and nothing else.
  */
 @Composable
-fun PlayerScreen(onBack: () -> Unit, vm: PlayerViewModel = hiltViewModel()) {
+fun PlayerScreen(args: Route.Player, onClose: (PlayerExit) -> Unit, vm: PlayerViewModel = hiltViewModel()) {
     val controller = vm.controller
     val st = vm.state.collectAsStateWithLifecycle()
     val engine by vm.engine.collectAsStateWithLifecycle()
@@ -52,26 +56,28 @@ fun PlayerScreen(onBack: () -> Unit, vm: PlayerViewModel = hiltViewModel()) {
     val scope = rememberCoroutineScope()
     var sheet by remember { mutableStateOf(PlayerSheet.None) }
     val surface = remember { VideoSurfaceHandle() }
-    val latestOnBack by rememberUpdatedState(onBack)
+    val latestOnClose by rememberUpdatedState(onClose)
     // Plain flag: only guards against a second back press, nothing draws from it.
     val exiting = remember { booleanArrayOf(false) }
 
-    LaunchedEffect(Unit) { vm.start() }
+    LaunchedEffect(Unit) { vm.start(args) }
 
     /**
-     * Freezes the video into a still first (a few ms), so the screen's zoom-out and fade
-     * carry the picture with them instead of leaving the video surface floating on top.
+     * Copies the current frame first (a few ms): the overlay flies that picture back into the
+     * video's card ([toCard]) or fades it, since the video surface itself can't be animated.
      */
-    fun exitPlayer() {
+    fun exitPlayer(toCard: Boolean = true) {
         if (exiting[0]) return
         exiting[0] = true
         scope.launch {
             surface.freeze()
+            val path = controller.state.value.currentPath ?: args.path
+            val info = PlayerExit(surface.frame, surface.windowBounds(), path, toCard)
             controller.leaveScreen()
-            latestOnBack()
+            latestOnClose(info)
         }
     }
-    BackHandler(onBack = ::exitPlayer)
+    BackHandler { exitPlayer() }
     DisposableEffect(Unit) {
         // Guarded inside: a no-op when exitPlayer already ran.
         onDispose { controller.leaveScreen() }
@@ -112,7 +118,7 @@ fun PlayerScreen(onBack: () -> Unit, vm: PlayerViewModel = hiltViewModel()) {
             override fun audioMode() {
                 // Keep playing as audio after leaving; controlled from the notification.
                 controller.enableAudioMode()
-                exitPlayer()
+                exitPlayer(toCard = false)
             }
             override fun sleepTimer() { sheet = PlayerSheet.Sleep }
             override fun pip() {
@@ -122,7 +128,7 @@ fun PlayerScreen(onBack: () -> Unit, vm: PlayerViewModel = hiltViewModel()) {
             override fun cycleAb() = controller.cycleAbRepeat()
             override fun miniPlayer() {
                 controller.minimize()
-                exitPlayer()
+                exitPlayer(toCard = false)
             }
         }
     }
@@ -138,7 +144,7 @@ fun PlayerScreen(onBack: () -> Unit, vm: PlayerViewModel = hiltViewModel()) {
         val holdFastForward = st.pick { it.holdFastForward }
         GestureLayer(controller, locked, seekInterval, holdFastForward) {
             Box(Modifier.fillMaxSize()) {
-                StatusLayer(st, vm, onBack = ::exitPlayer)
+                StatusLayer(st, vm, args.path, onBack = { exitPlayer() })
                 SubtitleLayer(st, subtitleStyle, vm::setSubtitleOffset)
                 SwipeHud(st.pick { it.swipeGesture }, st.pick { it.swipeValue })
                 AutoPlayCountdown(
@@ -179,18 +185,18 @@ private fun VideoLayer(st: State<PlayerUiState>, engine: PlayerEngine?, handle: 
 
 /** The error screen, or the loading poster until the first frame. */
 @Composable
-private fun StatusLayer(st: State<PlayerUiState>, vm: PlayerViewModel, onBack: () -> Unit) {
+private fun StatusLayer(st: State<PlayerUiState>, vm: PlayerViewModel, openedPath: String, onBack: () -> Unit) {
     val hasError = st.pick { it.hasError }
     val initialized = st.pick { it.isInitialized }
     val path = st.pick { it.currentPath }
     // Seeded synchronously from the in-memory cache, so the Hero has its target on the first frame.
-    val poster by produceState(vm.peekThumbnail(vm.args.path), path) {
+    val poster by produceState(vm.peekThumbnail(openedPath), path) {
         value = path?.let { vm.thumbnail(it) }
     }
     if (hasError) {
         ErrorState(st.pick { it.errorMessage }, onRetry = vm::retry, onBack = onBack)
     }
-    LoadingPoster(!initialized && !hasError, poster, path ?: vm.args.path)
+    LoadingPoster(!initialized && !hasError, poster)
 }
 
 @Composable
@@ -226,8 +232,11 @@ private fun PlayerWindowEffects(st: State<PlayerUiState>, activity: Activity?) {
             view.keepScreenOn = false
         }
     }
-    // The player is always black: light status-bar icons here, the theme's again when leaving.
-    DisposableEffect(activity) {
+    // The player is always black: light status-bar icons here, the theme's again as soon as it
+    // starts closing (the list shows through during the close animation).
+    val closing = PlayerOverlay.exit != null
+    DisposableEffect(activity, closing) {
+        if (closing) return@DisposableEffect onDispose {}
         val w = activity?.window
         val bars = w?.let { WindowCompat.getInsetsController(it, it.decorView) }
         val wasLight = bars?.isAppearanceLightStatusBars ?: false
@@ -239,8 +248,15 @@ private fun PlayerWindowEffects(st: State<PlayerUiState>, activity: Activity?) {
             bars?.isAppearanceLightNavigationBars = wasLightNav
         }
     }
+    val opened = remember { booleanArrayOf(false) }
     LaunchedEffect(rotation) {
         val a = activity ?: return@LaunchedEffect
+        // Changing the requested orientation re-lays out the whole window (~45 ms here): not
+        // in the middle of the open animation.
+        if (!opened[0]) {
+            opened[0] = true
+            kotlinx.coroutines.delay(OPEN_SETTLE_MS)
+        }
         a.requestedOrientation = when (rotation) {
             RotationMode.Auto -> ActivityInfo.SCREEN_ORIENTATION_FULL_USER
             RotationMode.Landscape -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE

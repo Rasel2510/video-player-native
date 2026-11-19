@@ -1,19 +1,33 @@
 package com.ayesha.player.ui.common
 
 import androidx.compose.animation.core.CubicBezierEasing
-import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.AnimationVector1D
+import androidx.compose.foundation.interaction.InteractionSource
+import androidx.compose.foundation.interaction.PressInteraction
+import androidx.compose.ui.graphics.GraphicsLayerScope
+import androidx.compose.ui.layout.Measurable
+import androidx.compose.ui.layout.MeasureResult
+import androidx.compose.ui.layout.MeasureScope
+import androidx.compose.ui.node.LayoutModifierNode
+import androidx.compose.ui.node.ModifierNodeElement
+
+import androidx.compose.ui.unit.Constraints
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithCache
@@ -23,7 +37,6 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.dp
 import com.ayesha.player.core.theme.AppRadius
 import com.ayesha.player.core.theme.AppTheme
@@ -83,6 +96,68 @@ private fun Modifier.liquidGlass(dark: Boolean): Modifier = drawWithCache {
 }
 
 /**
+ * animated_squish_card.dart: shrinks to 97 % while pressed (150 ms in, 200 ms out). One node per
+ * card that listens to the card's own press events: no state, no effect and no animation object
+ * is created until the card is actually pressed, and the scale is applied in the card's layer,
+ * so pressing never recomposes it. (collectIsPressedAsState + animateFloatAsState cost two
+ * effects, a channel and an animation per row created while scrolling.)
+ */
+private fun Modifier.squishOnPress(interaction: InteractionSource): Modifier = this then SquishElement(interaction)
+
+private data class SquishElement(val interaction: InteractionSource) : ModifierNodeElement<SquishNode>() {
+    override fun create() = SquishNode(interaction)
+    override fun update(node: SquishNode) = node.update(interaction)
+}
+
+private class SquishNode(private var interaction: InteractionSource) : Modifier.Node(), LayoutModifierNode {
+    private var scale by mutableStateOf<Animatable<Float, AnimationVector1D>?>(null)
+    private var listener: Job? = null
+
+    override fun onAttach() = listen()
+
+    fun update(source: InteractionSource) {
+        if (source == interaction) return
+        interaction = source
+        listener?.cancel()
+        listen()
+    }
+
+    private fun listen() {
+        listener = coroutineScope.launch {
+            var presses = 0
+            interaction.interactions.collect { i ->
+                when (i) {
+                    is PressInteraction.Press -> presses++
+                    is PressInteraction.Release, is PressInteraction.Cancel -> presses = (presses - 1).coerceAtLeast(0)
+                    else -> return@collect
+                }
+                // Created on the first press; the layer block reads it through state, so it
+                // starts following the animation from here on.
+                val a = scale ?: Animatable(1f).also { scale = it }
+                val down = presses > 0
+                launch { a.animateTo(if (down) 0.97f else 1f, tween(if (down) 150 else 200, easing = EaseOutQuad)) }
+            }
+        }
+    }
+
+    // One instance for the node's lifetime: a new lambda per placement (every scroll frame)
+    // would make Compose update and re-run each card's layer block on every frame.
+    private val layerBlock: GraphicsLayerScope.() -> Unit = {
+        val sc = scale?.value ?: 1f
+        scaleX = sc
+        scaleY = sc
+    }
+
+    override fun MeasureScope.measure(measurable: Measurable, constraints: Constraints): MeasureResult {
+        val p = measurable.measure(constraints)
+        return layout(p.width, p.height) {
+            // Its own layer either way, so the card's drawing is cached and only moved while scrolling.
+            p.placeWithLayer(0, 0, layerBlock = layerBlock)
+        }
+    }
+}
+
+/**
  * tintable_card.dart + animated_squish_card.dart: the library's folder/video card.
  * Standard = opaque surface; Tinted = Liquid Glass (see above). Shrinks to 97 % while pressed
  * (150 ms in, 200 ms out), with a ripple.
@@ -98,22 +173,12 @@ fun TintableCard(
     val c = AppTheme.colors
     val tinted = LocalAppearance.current.cardStyle == LibraryCardStyle.Tinted
     val interaction = remember { MutableInteractionSource() }
-    val pressed by interaction.collectIsPressedAsState()
-    val scale by animateFloatAsState(
-        targetValue = if (pressed) 0.97f else 1f,
-        animationSpec = tween(if (pressed) 150 else 200, easing = EaseOutQuad),
-        label = "squish",
-    )
     val shape = AppRadius.md
 
     Box(
         modifier
             .fillMaxWidth()
-            // Read in the layer block: the squish animates without recomposing the card.
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-            }
+            .squishOnPress(interaction)
             .then(if (tinted) Modifier.liquidGlass(c.isDark) else Modifier.background(c.surface, shape))
             .clip(shape)
             .combinedClickable(

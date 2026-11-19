@@ -16,6 +16,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
@@ -66,6 +67,15 @@ class VideoSurfaceHandle {
         if (frozen) return
         frame = capture()
         frozen = true
+    }
+
+    /** Where the video is drawn, in window pixels (the zoomed size, which may extend off screen). */
+    fun windowBounds(): Rect? {
+        val v = view ?: return null
+        if (!v.isAttachedToWindow || v.width <= 0 || v.height <= 0) return null
+        val loc = IntArray(2)
+        v.getLocationInWindow(loc)
+        return Rect(loc[0].toFloat(), loc[1].toFloat(), (loc[0] + v.width).toFloat(), (loc[1] + v.height).toFloat())
     }
 
     /** At most ~150 ms; null when there's no frame yet (still loading) or the copy fails. */

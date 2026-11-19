@@ -52,7 +52,7 @@ import com.ayesha.player.core.theme.PlayerControlsStyle
 import com.ayesha.player.core.util.VolumeColor
 import com.ayesha.player.playback.SwipeGesture
 import com.ayesha.player.ui.common.GlassSurface
-import com.ayesha.player.ui.common.sharedVideoThumb
+import androidx.compose.ui.graphics.graphicsLayer
 import kotlinx.coroutines.delay
 import java.io.File
 import java.util.Locale
@@ -357,21 +357,22 @@ fun ErrorState(message: String?, onRetry: () -> Unit, onBack: () -> Unit) {
 
 /**
  * loading_poster.dart: the cached thumbnail behind a spinner until the first frame, then a
- * short fade that reveals the video underneath.
+ * short fade that reveals the video underneath. The picture sits exactly where the opening
+ * thumbnail lands, and stays hidden while that thumbnail is still flying there.
  */
 @Composable
-fun LoadingPoster(visible: Boolean, poster: File?, path: String?) {
+fun LoadingPoster(visible: Boolean, poster: File?) {
+    val flying = LocalHeroFlying.current
     Fade(visible, inMs = 150, outMs = 240) {
         // Opaque: the video surface is a hole in the window, and while the screen is still
         // fading in, that hole would show the list underneath instead of black. Fading this out
         // crossfades from the poster to the first frame.
         Box(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
             if (poster != null) {
-                // The Hero target: the tapped card's thumbnail grows into this.
                 AsyncImage(
                     poster,
                     null,
-                    (if (path != null) Modifier.sharedVideoThumb(path) else Modifier).fillMaxSize(),
+                    Modifier.fillMaxSize().graphicsLayer { alpha = if (flying.value) 0f else 1f },
                     contentScale = ContentScale.Fit,
                 )
             }

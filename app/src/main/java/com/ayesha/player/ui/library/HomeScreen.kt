@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import com.ayesha.player.ui.common.rememberPrefetchingListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
@@ -192,6 +193,8 @@ private fun LibraryContent(vm: LibraryViewModel, playback: PlaybackSettings, onO
     LaunchedEffect(Unit) {
         if (StoragePermissions.canReadLibrary(context)) vm.onAccessGranted(forceScan = false) else requestAccess()
     }
+    // The player is drawn over this screen, so closing it isn't a resume: refresh then too.
+    com.ayesha.player.ui.player.OnPlayerClosed { vm.onResume() }
     LifecycleResumeEffect(Unit) {
         if (vm.awaitingStorageSettings) {
             vm.awaitingStorageSettings = false
@@ -266,6 +269,7 @@ private fun LibraryContent(vm: LibraryViewModel, playback: PlaybackSettings, onO
         ) {
             LazyColumn(
                 Modifier.fillMaxSize(),
+                state = rememberPrefetchingListState(),
                 contentPadding = PaddingValues(start = 16.dp, top = 8.dp, end = 16.dp, bottom = 8.dp + bottomInset),
             ) {
                 if (searching && folders.isEmpty() && matched.isEmpty()) {

@@ -1,9 +1,7 @@
 package com.ayesha.player.ui.player
 
-import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import androidx.navigation.toRoute
 import com.ayesha.player.core.theme.PlayerControlsStyle
 import com.ayesha.player.data.library.LibraryRepository
 import com.ayesha.player.data.media.ThumbnailRepository
@@ -19,10 +17,12 @@ import kotlinx.coroutines.flow.stateIn
 import java.io.File
 import javax.inject.Inject
 
-/** Thin screen adapter over the app-scoped [PlayerController]. */
+/**
+ * Thin screen adapter over the app-scoped [PlayerController]. Activity-scoped: the player is an
+ * overlay, not a navigation destination, and each open passes its arguments to [start].
+ */
 @HiltViewModel
 class PlayerViewModel @Inject constructor(
-    savedState: SavedStateHandle,
     val controller: PlayerController,
     private val library: LibraryRepository,
     private val vault: com.ayesha.player.data.vault.VaultRepository,
@@ -31,7 +31,9 @@ class PlayerViewModel @Inject constructor(
     private val thumbnails: ThumbnailRepository,
 ) : ViewModel() {
 
-    val args = savedState.toRoute<Route.Player>()
+    /** What the current player screen was opened with. */
+    lateinit var args: Route.Player
+        private set
     val state = controller.state
     val engine = controller.engine
 
@@ -41,13 +43,10 @@ class PlayerViewModel @Inject constructor(
     val controlsStyle: StateFlow<PlayerControlsStyle> = appearance.settings.map { it?.controlsStyle ?: PlayerControlsStyle.Tint }
         .stateIn(viewModelScope, SharingStarted.Eagerly, appearance.settings.value?.controlsStyle ?: PlayerControlsStyle.Tint)
 
-    private var started = false
-
-    /** Starts playback once per screen (survives recomposition and configuration changes). */
-    fun start() {
-        if (started) return
-        started = true
-        open(args.path, args.name, args.resumeMs)
+    /** Starts playback for one open of the player (called once per player screen). */
+    fun start(route: Route.Player) {
+        args = route
+        open(route.path, route.name, route.resumeMs)
     }
 
     /** "Retry" on the error screen: reopen the current video from where it was. */
@@ -57,10 +56,10 @@ class PlayerViewModel @Inject constructor(
     }
 
     private fun open(path: String, name: String, resumeMs: Long?) {
-        val playlist = when (args.folderPath) {
+        val playlist = when (val folder = args.folderPath) {
             null -> emptyList()
             Route.VAULT_PLAYLIST -> vault.videos.value
-            else -> library.folder(args.folderPath)?.videos.orEmpty()
+            else -> library.folder(folder)?.videos.orEmpty()
         }
         val index = playlist.indexOfFirst { it.path == path }
         controller.init(path, name, resumeMs, if (index >= 0) playlist else emptyList(), index)

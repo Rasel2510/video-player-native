@@ -13,11 +13,9 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Movie
-import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -33,14 +31,23 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import coil3.compose.AsyncImage
-import coil3.request.ImageRequest
+import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.center
+import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.scale
+import androidx.compose.ui.graphics.drawscope.translate
+import androidx.compose.ui.graphics.vector.PathParser
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
+import kotlin.math.roundToInt
 import androidx.compose.ui.platform.LocalDensity
 import com.ayesha.player.core.theme.AppTheme
 import com.ayesha.player.core.util.DurationFormatter
@@ -106,11 +113,6 @@ interface ThumbnailEntryPoint {
     fun thumbnails(): ThumbnailRepository
 }
 
-/**
- * thumbnail_widget.dart: async thumbnail with a shimmer while loading, a play glyph and the
- * duration chip once loaded, and a movie icon if it can't be generated. Reloads in place
- * when a thumbnail arrives later (e.g. captured by the playing software engine).
- */
 /** Resolved once for the whole app (it used to be looked up again in every list row). */
 private var thumbnailRepo: ThumbnailRepository? = null
 
@@ -118,72 +120,94 @@ private fun thumbnails(context: android.content.Context): ThumbnailRepository =
     thumbnailRepo ?: EntryPointAccessors.fromApplication(context.applicationContext, ThumbnailEntryPoint::class.java)
         .thumbnails().also { thumbnailRepo = it }
 
+private val PlayDisc = Color(0x80000000)
+private val ChipBg = Color(0xB3000000)
+private val ChipShape = RoundedCornerShape(4.dp)
+private val DurationStyle = TextStyle(color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.W600, letterSpacing = 0.2.sp)
+
+/** Icons.Rounded.PlayArrow's outline, in its 24-unit viewport: parsed once, drawn by every row. */
+private val PlayGlyph: Path by lazy {
+    PathParser().parsePathString(
+        "M8 6.82v10.36c0 .79.87 1.27 1.54.84l8.14-5.18c.62-.39.62-1.29 0-1.69L9.54 5.98C8.87 5.55 8 6.03 8 6.82z",
+    ).toPath()
+}
+
+/**
+ * thumbnail_widget.dart: the thumbnail with a play glyph and the duration chip once loaded,
+ * a shimmer while loading, and a movie icon if none can be made.
+ *
+ * Built for long lists: the picture, the dark disc and the play glyph are drawn by one node
+ * from a bitmap the repository decoded off the main thread, and a thumbnail seen before is
+ * there on the row's first frame. (An image loader per row cost about a millisecond and a half
+ * of main-thread work for every row scrolled into view on a budget phone.)
+ */
 @Composable
 fun VideoThumbnail(videoPath: String, width: Dp, height: Dp, duration: Duration?, modifier: Modifier = Modifier) {
-    val context = LocalContext.current
-    val repo = thumbnails(context)
-    var file by remember(videoPath) { mutableStateOf(repo.peek(videoPath)) }
+    val repo = thumbnails(LocalContext.current)
+    val density = LocalDensity.current
+    val pxW = with(density) { width.roundToPx() }
+    val pxH = with(density) { height.roundToPx() }
+    var image by remember(videoPath, pxW, pxH) { mutableStateOf(repo.peekBitmap(videoPath, pxW, pxH)) }
     var failed by remember(videoPath) { mutableStateOf(false) }
 
-    // Only rows without a thumbnail yet start any work. Already-loaded rows (most of them while
-    // scrolling a folder you have seen before) launch nothing at all.
-    if (file == null) {
-        LaunchedEffect(videoPath) {
-            val got = repo.getThumbnail(videoPath)
+    // Only rows without a picture in memory start any work.
+    if (image == null) {
+        LaunchedEffect(videoPath, pxW, pxH) {
+            val got = repo.loadBitmap(videoPath, pxW, pxH)
             if (got != null) {
-                file = got
+                image = got
                 return@LaunchedEffect
             }
             failed = true
             // It may still arrive later (e.g. captured by the playing software engine).
             repo.updates.first { it == videoPath }
-            file = repo.getThumbnail(videoPath)
-            failed = file == null
+            image = repo.loadBitmap(videoPath, pxW, pxH)
+            failed = image == null
         }
     }
 
-    // Exact pixel size up front: Coil can then answer from its memory cache synchronously, so a
-    // cached thumbnail is there on the row's first frame instead of popping in a frame later.
-    val density = LocalDensity.current
-    val pxW = with(density) { width.roundToPx() }
-    val pxH = with(density) { height.roundToPx() }
-
-    Box(modifier.size(width, height)) {
-        val f: File? = file
-        when {
-            f != null -> {
-                val request = remember(f, pxW, pxH) {
-                    ImageRequest.Builder(context).data(f).size(pxW, pxH).build()
-                }
-                AsyncImage(
-                    model = request,
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize(),
+    val img = image
+    when {
+        // heroSource: the player grows out of this thumbnail and shrinks back into it.
+        img != null -> Box(modifier.size(width, height).heroSource(videoPath, img).thumbnailImage(img)) {
+            if (duration != null && duration.inWholeSeconds > 0) {
+                Text(
+                    DurationFormatter.format(duration),
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(4.dp)
+                        .background(ChipBg, ChipShape)
+                        .padding(horizontal = 4.dp, vertical = 2.dp),
+                    style = DurationStyle,
                 )
-                Box(
-                    Modifier.align(Alignment.Center).size(28.dp).background(Color(0x80000000), CircleShape),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(Icons.Rounded.PlayArrow, null, Modifier.size(16.dp), tint = Color.White)
-                }
-                if (duration != null && duration.inWholeSeconds > 0) {
-                    Text(
-                        DurationFormatter.format(duration),
-                        modifier = Modifier
-                            .align(Alignment.BottomEnd)
-                            .padding(4.dp)
-                            .background(Color(0xB3000000), RoundedCornerShape(4.dp))
-                            .padding(horizontal = 4.dp, vertical = 2.dp),
-                        style = TextStyle(color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.W600, letterSpacing = 0.2.sp),
-                    )
-                }
             }
-            failed -> Box(Modifier.fillMaxSize().background(AppTheme.colors.elevated), contentAlignment = Alignment.Center) {
-                Icon(Icons.Outlined.Movie, null, Modifier.size(22.dp), tint = AppTheme.colors.textMuted)
-            }
-            // Reads the shared value in the draw phase only: no recomposition per frame.
-            else -> ShimmerBox(Modifier.fillMaxSize())
+        }
+        failed -> Box(modifier.size(width, height).background(AppTheme.colors.elevated), contentAlignment = Alignment.Center) {
+            Icon(Icons.Outlined.Movie, null, Modifier.size(22.dp), tint = AppTheme.colors.textMuted)
+        }
+        // Reads the shared value in the draw phase only: no recomposition per frame.
+        else -> ShimmerBox(modifier.size(width, height))
+    }
+}
+
+/** Center-crop of [img], then a 28 dp dark disc with the 16 dp play glyph, all in one draw. */
+private fun Modifier.thumbnailImage(img: ImageBitmap): Modifier = drawWithCache {
+    val scale = maxOf(size.width / img.width, size.height / img.height)
+    val srcW = (size.width / scale).roundToInt().coerceIn(1, img.width)
+    val srcH = (size.height / scale).roundToInt().coerceIn(1, img.height)
+    val srcOffset = IntOffset((img.width - srcW) / 2, (img.height - srcH) / 2)
+    val srcSize = IntSize(srcW, srcH)
+    val dstSize = IntSize(size.width.roundToInt(), size.height.roundToInt())
+    val disc = 14.dp.toPx()
+    val glyph = 16.dp.toPx()
+    val glyphScale = glyph / 24f
+    val glyphLeft = size.center.x - glyph / 2
+    val glyphTop = size.center.y - glyph / 2
+    onDrawBehind {
+        drawImage(img, srcOffset, srcSize, dstSize = dstSize, filterQuality = FilterQuality.Low)
+        drawCircle(PlayDisc, disc, center)
+        translate(glyphLeft, glyphTop) {
+            scale(glyphScale, glyphScale, pivot = Offset.Zero) { drawPath(PlayGlyph, Color.White) }
         }
     }
 }

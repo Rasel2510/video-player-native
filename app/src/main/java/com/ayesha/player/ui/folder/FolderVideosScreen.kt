@@ -92,6 +92,8 @@ fun FolderVideosScreen(
         vm.onResume()
         onPauseOrDispose { }
     }
+    // The player is drawn over this screen, so closing it isn't a resume: refresh the resume point then.
+    com.ayesha.player.ui.player.OnPlayerClosed { vm.onResume() }
 
     val f = folder
     val sorted = listing.sorted
@@ -236,6 +238,7 @@ fun FolderVideosScreen(
             } else {
                 LazyColumn(
                     Modifier.fillMaxSize(),
+                    state = rememberPrefetchingListState(),
                     contentPadding = PaddingValues(
                         start = 16.dp,
                         top = 8.dp,

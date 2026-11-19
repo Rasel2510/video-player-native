@@ -2,6 +2,11 @@ package com.ayesha.player.data.media
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.ImageDecoder
+import android.util.LruCache
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import android.media.MediaMetadataRetriever
 import android.os.Build
 import android.os.SystemClock
@@ -60,6 +65,61 @@ class ThumbnailRepository @Inject constructor(
 
     /** Already-known file without any I/O, for a first draw. */
     fun peek(videoPath: String): File? = resolved[videoPath]
+
+    // ── Decoded thumbnails for lists ─────────────────────────────────────────
+    // Lists draw these bitmaps directly instead of running an image loader per row. A row that
+    // was on screen before gets its picture synchronously, on its first frame, and creating a
+    // row costs no image-request, painter or coroutine machinery.
+
+    private val bitmaps = object : LruCache<String, ImageBitmap>(BITMAP_CACHE_BYTES) {
+        override fun sizeOf(key: String, value: ImageBitmap) = value.width * value.height * 4
+    }
+
+    /** Decoding cached JPEGs is quick: kept off the slow generation threads so it never queues behind them. */
+    private val decodeDispatcher = Dispatchers.IO.limitedParallelism(2)
+
+    private fun bitmapKey(videoPath: String, w: Int, h: Int) = "$videoPath|$w|$h"
+
+    /** The decoded thumbnail at [w]x[h] px if it's in memory; no I/O. */
+    fun peekBitmap(videoPath: String, w: Int, h: Int): ImageBitmap? = bitmaps.get(bitmapKey(videoPath, w, h))
+
+    /**
+     * The thumbnail decoded for a [w]x[h] px slot (scaled to cover it, not cropped), generating
+     * the JPEG first if needed. Null when no thumbnail can be made.
+     */
+    suspend fun loadBitmap(videoPath: String, w: Int, h: Int): ImageBitmap? {
+        val key = bitmapKey(videoPath, w, h)
+        bitmaps.get(key)?.let { return it }
+        val file = getThumbnail(videoPath) ?: return null
+        return withContext(decodeDispatcher) {
+            decodeCover(file, w, h)?.also { bitmaps.put(key, it) }
+        }
+    }
+
+    private fun decodeCover(file: File, w: Int, h: Int): ImageBitmap? = try {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val src = ImageDecoder.createSource(file)
+            ImageDecoder.decodeBitmap(src) { decoder, info, _ ->
+                // Scaled while decoding to just cover the slot: no full-size bitmap, no second pass.
+                val sw = info.size.width
+                val sh = info.size.height
+                val scale = maxOf(w.toFloat() / sw, h.toFloat() / sh).coerceAtMost(1f)
+                decoder.setTargetSize((sw * scale).toInt().coerceAtLeast(1), (sh * scale).toInt().coerceAtLeast(1))
+                // Uploaded to the GPU here, on this thread, instead of on the first draw.
+                decoder.allocator = ImageDecoder.ALLOCATOR_HARDWARE
+            }.asImageBitmap()
+        } else {
+            val opts = BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.HARDWARE }
+            BitmapFactory.decodeFile(file.path, opts)?.asImageBitmap()
+        }
+    } catch (_: Exception) {
+        null
+    }
+
+    private fun evictBitmaps(videoPath: String) {
+        val prefix = "$videoPath|"
+        bitmaps.snapshot().keys.filter { it.startsWith(prefix) }.forEach { bitmaps.remove(it) }
+    }
 
     suspend fun getThumbnail(videoPath: String): File? {
         resolved[videoPath]?.let { return it }
@@ -138,6 +198,7 @@ class ThumbnailRepository @Inject constructor(
             writeAtomically(target, bytes)
             resolved[videoPath] = target
             failures.remove(videoPath)
+            evictBitmaps(videoPath)
             _updates.tryEmit(videoPath)
             target
         } catch (_: Exception) {
@@ -146,6 +207,7 @@ class ThumbnailRepository @Inject constructor(
     }
 
     suspend fun remove(videoPath: String) = withContext(Dispatchers.IO) {
+        evictBitmaps(videoPath)
         resolved.remove(videoPath)
         failures.remove(videoPath)
         cacheFileFor(videoPath).delete()
@@ -154,6 +216,7 @@ class ThumbnailRepository @Inject constructor(
 
     /** Moves a renamed file's thumbnail instead of regenerating it. */
     suspend fun rename(oldPath: String, newPath: String) = withContext(Dispatchers.IO) {
+        evictBitmaps(oldPath)
         resolved.remove(oldPath)
         failures.remove(oldPath)
         val old = cacheFileFor(oldPath)
@@ -163,6 +226,7 @@ class ThumbnailRepository @Inject constructor(
     }
 
     suspend fun clearCache() = withContext(Dispatchers.IO) {
+        bitmaps.evictAll()
         resolved.clear()
         failures.clear()
         cacheDir.listFiles()?.forEach { it.delete() }
@@ -210,5 +274,8 @@ class ThumbnailRepository @Inject constructor(
         const val MAX_CONCURRENT = 3
         const val MAX_ATTEMPTS = 4
         const val RETRY_COOLDOWN_MS = 45_000L
+
+        /** ~290 list thumbnails (88x58 dp at 2x is ~80 KB each). */
+        val BITMAP_CACHE_BYTES = minOf(24 shl 20, (Runtime.getRuntime().maxMemory() / 8).toInt())
     }
 }

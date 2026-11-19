@@ -153,9 +153,16 @@ class PlayerController @Inject constructor(
             }
         }
         watchDeviceVolume()
-        // Notification, lock screen and headset buttons, and the foreground service.
-        connector.connect()
+        // Notification, lock screen and headset buttons, and the foreground service. Starting
+        // the service costs ~40 ms of main-thread time: after the open animation, not during it.
+        connectJob?.cancel()
+        connectJob = scope.launch {
+            delay(SERVICE_CONNECT_DELAY_MS)
+            if (!isDisposing) connector.connect()
+        }
     }
+
+    private var connectJob: Job? = null
 
     /**
      * Builds the ExoPlayer ahead of time (call when the app is idle), so opening the first video
@@ -844,6 +851,7 @@ class PlayerController @Inject constructor(
             recycle(old)
         }
         _state.value = PlayerUiState()
+        connectJob?.cancel()
         connector.disconnect()
     }
 
@@ -858,3 +866,6 @@ class PlayerController @Inject constructor(
         _engine.value = null
     }
 }
+
+/** After the player's 360 ms open animation. */
+private const val SERVICE_CONNECT_DELAY_MS = 600L
