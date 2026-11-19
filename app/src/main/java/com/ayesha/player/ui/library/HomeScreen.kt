@@ -48,6 +48,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.font.FontWeight
@@ -170,6 +172,8 @@ private fun LibraryContent(vm: LibraryViewModel, playback: PlaybackSettings, onO
     val searchText by vm.searchText.collectAsStateWithLifecycle()
     val search by vm.search.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
     var refreshing by remember { mutableStateOf(false) }
     var removeItem by remember { mutableStateOf<ContinueWatchingItem?>(null) }
 
@@ -300,7 +304,11 @@ private fun LibraryContent(vm: LibraryViewModel, playback: PlaybackSettings, onO
                     }
                 }
                 items(matched, key = { "v:" + it.video.path }) { m ->
-                    SearchVideoRow(m.video, m.folder.name) { vm.openSearchMatch(m) }
+                    SearchVideoRow(m.video, m.folder.name) {
+                        focusManager.clearFocus(force = true)
+                        keyboardController?.hide()
+                        vm.openSearchMatch(m)
+                    }
                 }
             }
         }

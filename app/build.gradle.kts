@@ -17,6 +17,9 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "0.1.0"
+        ndk {
+            abiFilters += listOf("armeabi-v7a", "arm64-v8a")
+        }
     }
 
     buildTypes {
@@ -50,14 +53,12 @@ android {
     // The app is English-only: drop the translations bundled by AndroidX and Material.
     androidResources { localeFilters += listOf("en") }
 
-    // libmpv ships ~25 MB of native code per ABI: one APK per ABI keeps each install small.
-    // (An AAB for the Play Store splits by ABI automatically.) 32-bit x86 is emulator-only: dropped.
     splits {
         abi {
             isEnable = true
             reset()
-            include("arm64-v8a", "armeabi-v7a", "x86_64")
-            isUniversalApk = false
+            include("arm64-v8a", "armeabi-v7a")
+            isUniversalApk = true
         }
     }
 }
