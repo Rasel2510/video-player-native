@@ -669,6 +669,19 @@ class PlayerController @Inject constructor(
         hideJob?.cancel()
     }
 
+    /**
+     * The player screen is closing: silent and saved right away. The rest of the teardown
+     * ([leaveScreen], via the screen's disposal) waits until the close animation has finished:
+     * detaching the video surface blocks the main thread for ~70 ms while ExoPlayer's playback
+     * thread lets go of it, which used to land on the animation's first frame.
+     */
+    fun pauseForExit() {
+        if (isDisposing) return
+        hideJob?.cancel()
+        runCatching { _engine.value?.pause() }
+        savePosition()
+    }
+
     fun togglePlay() {
         if (isDisposing) return
         val engine = _engine.value ?: return

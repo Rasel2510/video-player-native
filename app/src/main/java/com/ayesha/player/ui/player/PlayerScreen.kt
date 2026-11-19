@@ -63,27 +63,34 @@ fun PlayerScreen(args: Route.Player, onClose: (PlayerExit) -> Unit, vm: PlayerVi
     LaunchedEffect(Unit) { vm.start(args) }
 
     /**
-     * Copies the current frame first (a few ms): the overlay flies that picture back into the
-     * video's card ([toCard]) or fades it, since the video surface itself can't be animated.
+     * Copies the current frame first: the overlay flies that picture back into the video's card
+     * ([toCard]) or fades it, since the video surface itself can't be animated.
      */
     fun exitPlayer(toCard: Boolean = true) {
         if (exiting[0]) return
         exiting[0] = true
+        // Answers the press at once (the controls fade) while the frame is being copied.
+        controller.hideControls()
+        // Closing for good: only pause and save now. The teardown runs when this screen is
+        // disposed, after the close animation (onDispose below), so none of it lands mid-flight.
+        if (toCard) controller.pauseForExit()
         scope.launch {
             surface.freeze()
             val path = controller.state.value.currentPath ?: args.path
             val info = PlayerExit(surface.frame, surface.windowBounds(), path, toCard)
-            controller.leaveScreen()
+            // Mini player and audio mode keep playing: leaving is cheap, and must happen now.
+            if (!toCard) controller.leaveScreen()
             latestOnClose(info)
         }
     }
     BackHandler { exitPlayer() }
     DisposableEffect(Unit) {
-        // Guarded inside: a no-op when exitPlayer already ran.
+        // A no-op when the mini player or audio mode already left; otherwise the full teardown.
         onDispose { controller.leaveScreen() }
     }
 
     PlayerWindowEffects(st, activity)
+    CopyWarmUp(st, surface)
 
     // ── Pickers ──────────────────────────────────────────────────────────────
     val subtitlePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -312,5 +319,21 @@ private fun PlayerSheets(
             onCancel = controller::cancelSleepTimer,
             onDismiss = onDismiss,
         )
+    }
+}
+
+/**
+ * Copies a tiny frame once, about a second after playback starts. The first copy of a session
+ * compiles the GPU conversion and sets up its buffers (~100 ms on the render thread here); done
+ * now, while nothing in the app animates (the video plays on its own surface, unaffected), the
+ * copy made when closing is the quick one and the close animation starts sooner.
+ */
+@Composable
+private fun CopyWarmUp(st: State<PlayerUiState>, surface: VideoSurfaceHandle) {
+    val initialized = st.pick { it.isInitialized }
+    LaunchedEffect(initialized) {
+        if (!initialized) return@LaunchedEffect
+        kotlinx.coroutines.delay(1200)
+        surface.warmUp()
     }
 }

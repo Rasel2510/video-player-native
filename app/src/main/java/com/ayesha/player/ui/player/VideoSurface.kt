@@ -78,12 +78,21 @@ class VideoSurfaceHandle {
         return Rect(loc[0].toFloat(), loc[1].toFloat(), (loc[0] + v.width).toFloat(), (loc[1] + v.height).toFloat())
     }
 
+    private var warmed = false
+
+    /** One throwaway 8 px copy, so the first real copy doesn't pay the GPU setup. Once per screen. */
+    suspend fun warmUp() {
+        if (warmed || frozen) return
+        warmed = true
+        capture(maxSide = 8f)
+    }
+
     /** At most ~150 ms; null when there's no frame yet (still loading) or the copy fails. */
-    private suspend fun capture(): ImageBitmap? {
+    private suspend fun capture(maxSide: Float = 960f): ImageBitmap? {
         val v = view ?: return null
         if (v.width <= 0 || v.height <= 0 || !v.holder.surface.isValid) return null
-        // A still for a 250 ms fade doesn't need more than ~1280 px.
-        val scale = min(1f, 1280f / max(v.width, v.height))
+        // A still that shrinks into a card within 400 ms doesn't need more than ~960 px.
+        val scale = min(1f, maxSide / max(v.width, v.height))
         val bmp = runCatching {
             Bitmap.createBitmap((v.width * scale).toInt().coerceAtLeast(1), (v.height * scale).toInt().coerceAtLeast(1), Bitmap.Config.ARGB_8888)
         }.getOrNull() ?: return null
