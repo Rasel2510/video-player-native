@@ -17,7 +17,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -60,6 +62,8 @@ fun FolderVideosScreen(
     val c = AppTheme.colors
     val context = LocalContext.current
     val haptics = LocalHapticFeedback.current
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
     val folder by vm.folder.collectAsStateWithLifecycle()
     val listing by vm.listing.collectAsStateWithLifecycle()
     // Kept as State objects and read per card through derivedStateOf: duration batches (every
@@ -113,6 +117,11 @@ fun FolderVideosScreen(
                 confirmLabel = if (move) "Move here" else "Copy here",
             ),
         )
+    }
+
+    fun dismissSearchKeyboard() {
+        focusManager.clearFocus(force = true)
+        keyboardController?.hide()
     }
 
     Scaffold(
@@ -175,7 +184,10 @@ fun FolderVideosScreen(
         floatingActionButton = {
             if (!selectionMode && last != null) {
                 ExtendedFloatingActionButton(
-                    onClick = { vm.resume(last) },
+                    onClick = {
+                        dismissSearchKeyboard()
+                        vm.resume(last)
+                    },
                     containerColor = c.accent,
                     contentColor = Color.White,
                     shape = RoundedCornerShape(50),
@@ -258,7 +270,10 @@ fun FolderVideosScreen(
                             sortBy = sortBy,
                             selectionMode = selectionMode,
                             isSelected = v.path in selected,
-                            onClick = { vm.open(v) },
+                            onClick = {
+                                dismissSearchKeyboard()
+                                vm.open(v)
+                            },
                             onLongClick = {
                                 haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                                 dialog = FolderDialog.Options(v)
@@ -277,7 +292,10 @@ fun FolderVideosScreen(
         is FolderDialog.Options -> VideoOptionsSheet(
             video = d.video,
             hasResume = vm.hasResume(d.video.path),
-            onPlay = { vm.open(d.video) },
+            onPlay = {
+                dismissSearchKeyboard()
+                vm.open(d.video)
+            },
             onRename = { dialog = FolderDialog.Rename(d.video) },
             onDetails = { dialog = FolderDialog.Details(d.video) },
             onSelect = { vm.enterSelection(d.video) },
