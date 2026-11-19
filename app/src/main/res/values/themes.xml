@@ -1,0 +1,15 @@
+<resources>
+    <!-- Window theme behind Compose. Colors come from AyeshaTheme; this only avoids a white flash. -->
+    <style name="Theme.Ayesha" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/window_bg</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+
+    <!-- Same splash as the Flutter build (flutter_native_splash: #050B0B + icon). -->
+    <style name="Theme.Ayesha.Splash" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/splash_bg</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/android12splash</item>
+        <item name="postSplashScreenTheme">@style/Theme.Ayesha</item>
+    </style>
+</resources>

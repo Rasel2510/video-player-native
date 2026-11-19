@@ -1,0 +1,16 @@
+# Baseline profile: code Android compiles ahead of time at install (instead of interpreting it
+# and JIT-compiling while you scroll). Flutter ships AOT machine code by default; this gives the
+# native app the same start. Compose/AndroidX libraries add their own profiles on top of these.
+#
+# The whole app: it's small (~11k lines) and nearly all of it is on the hot path
+# (library lists, folder screen, player, gestures).
+HSPLcom/ayesha/player/**->**(**)**
+Lcom/ayesha/player/**;
+#
+# Scrolling, lists, drawing and gesture paths in Compose, plus Coil's image pipeline.
+HSPLandroidx/compose/foundation/lazy/**->**(**)**
+HSPLandroidx/compose/foundation/gestures/**->**(**)**
+HSPLandroidx/compose/ui/node/**->**(**)**
+HSPLandroidx/compose/ui/graphics/**->**(**)**
+HSPLandroidx/compose/runtime/**->**(**)**
+HSPLcoil3/**->**(**)**

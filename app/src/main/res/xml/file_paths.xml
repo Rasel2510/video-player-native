@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Videos live anywhere under /storage (internal and SD cards), so sharing needs the root. -->
+    <root-path name="storage" path="/storage" />
+    <external-path name="external" path="." />
+</paths>
