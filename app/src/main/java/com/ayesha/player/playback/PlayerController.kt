@@ -232,7 +232,16 @@ class PlayerController @Inject constructor(
         _engine.value = null
         recycle(old)
 
-        set { copy(isInitialized = false, hasError = false, errorMessage = null, usingSoftwareDecoder = true) }
+        set {
+            copy(
+                isInitialized = false,
+                hasError = false,
+                errorMessage = null,
+                usingSoftwareDecoder = true,
+                currentCue = "",
+                bitmapCues = emptyList(),
+            )
+        }
         _engine.value = software
         listen(software) {
             set { copy(isInitialized = true) }
@@ -247,6 +256,9 @@ class PlayerController @Inject constructor(
         software.setVolume(100f)
         software.setRate(s.playbackSpeed)
         software.setRepeatMode(s.loopMode.repeatCode)
+        // Carry the subtitle state over: the new engine would otherwise start with its defaults.
+        software.setSubtitleDelay(s.subtitleDelay)
+        if (!s.subtitlesEnabled) software.selectSubtitleTrack(null)
         software.open(path, resumeAt, play = true)
     }
 
@@ -306,14 +318,25 @@ class PlayerController @Inject constructor(
                             // Don't clobber "audio disabled" (the engine then reports no active audio).
                             selectedAudioTrack = if (audioEnabled) e.snapshot.audio.find { it.id == e.snapshot.activeAudioId } else null,
                             subtitleTracks = e.snapshot.subtitle,
-                            selectedSubtitleTrack = e.snapshot.subtitle.find { it.id == e.snapshot.activeSubtitleId },
+                            // While off, the engine reports no active track: keep the user's pick,
+                            // so turning subtitles back on returns to it instead of the first track.
+                            selectedSubtitleTrack = if (subtitlesEnabled) {
+                                e.snapshot.subtitle.find { it.id == e.snapshot.activeSubtitleId }
+                            } else {
+                                selectedSubtitleTrack?.takeIf { t -> e.snapshot.subtitle.any { it.id == t.id } }
+                            },
                         )
                     }
                     is EngineEvent.Size -> if (!e.size.isEmpty) {
                         set { copy(videoWidth = e.size.width, videoHeight = e.size.height) }
                         markReady()
                     }
-                    is EngineEvent.Cues -> set { copy(currentCue = if (subtitlesEnabled) e.text else "") }
+                    is EngineEvent.Cues -> set {
+                        copy(
+                            currentCue = if (subtitlesEnabled) e.text else "",
+                            bitmapCues = if (subtitlesEnabled) e.bitmaps else emptyList(),
+                        )
+                    }
                     EngineEvent.Completed -> onCompleted()
                     is EngineEvent.Error -> if (e.message.isNotEmpty()) {
                         // ExoPlayer can't decode it: retry once in software before showing an error.
@@ -461,6 +484,7 @@ class PlayerController @Inject constructor(
                 zoomScale = 1f,
                 subtitleDelay = 0f,
                 currentCue = "",
+                bitmapCues = emptyList(),
                 abRepeatStartMs = null,
                 abRepeatEndMs = null,
                 hasEnded = false,
@@ -482,6 +506,8 @@ class PlayerController @Inject constructor(
         engine.setVolume(if (s.volume > 100f) s.volume else 100f)
         engine.setRate(s.playbackSpeed)
         engine.setRepeatMode(s.loopMode.repeatCode)
+        // The state's delay was just reset: the engine's (mpv keeps it across files) must follow.
+        engine.setSubtitleDelay(0f)
         engine.open(path, 0, play = true)
     }
 
@@ -554,9 +580,11 @@ class PlayerController @Inject constructor(
     }
 
     fun toggleSubtitles() {
-        if (s.subtitlesEnabled) {
+        // "On" means a track is actually showing: a file whose tracks aren't flagged default
+        // opens with none, and the first tap should then turn one on, not "off".
+        if (s.subtitlesShowing) {
             _engine.value?.selectSubtitleTrack(null)
-            set { copy(subtitlesEnabled = false, currentCue = "") }
+            set { copy(subtitlesEnabled = false, currentCue = "", bitmapCues = emptyList()) }
         } else {
             // With no track at all, stay off: "ON" with nothing selected would be misleading.
             val target = s.selectedSubtitleTrack ?: s.subtitleTracks.firstOrNull()

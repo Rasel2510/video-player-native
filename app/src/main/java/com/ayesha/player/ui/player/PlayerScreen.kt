@@ -187,6 +187,8 @@ private fun VideoLayer(st: State<PlayerUiState>, engine: PlayerEngine?, handle: 
         st.pick { if (it.isPipMode) 1f else it.zoomScale },
         density = density,
         handle = handle,
+        // PiP shows only the raw video, as for text subtitles.
+        bitmapCues = st.pick { if (it.subtitlesEnabled && !it.isPipMode) it.bitmapCues else emptyList() },
     )
 }
 
@@ -301,7 +303,7 @@ private fun PlayerSheets(
         PlayerSheet.Subtitles -> SubtitleSheet(
             tracks = st.pick { it.subtitleTracks },
             selected = st.pick { it.selectedSubtitleTrack },
-            enabled = st.pick { it.subtitlesEnabled },
+            enabled = st.pick { it.subtitlesShowing },
             delay = st.pick { it.subtitleDelay },
             style = subtitleStyle,
             vm = vm,

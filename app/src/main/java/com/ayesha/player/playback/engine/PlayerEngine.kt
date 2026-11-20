@@ -1,6 +1,8 @@
 package com.ayesha.player.playback.engine
 
+import android.graphics.Bitmap
 import android.view.Surface
+import androidx.compose.runtime.Immutable
 import com.ayesha.player.data.model.TrackSnapshot
 import com.ayesha.player.data.model.VideoSize
 import kotlinx.coroutines.flow.SharedFlow
@@ -20,8 +22,11 @@ sealed interface EngineEvent {
     data class Tracks(val snapshot: TrackSnapshot) : EngineEvent
     data class Size(val size: VideoSize) : EngineEvent
 
-    /** The active subtitle text ('' = none), drawn by the app's own styled overlay. */
-    data class Cues(val text: String) : EngineEvent
+    /**
+     * The active subtitle text ('' = none), drawn by the app's own styled overlay, plus any
+     * image subtitles (PGS / VobSub / DVB), drawn over the video where the file places them.
+     */
+    data class Cues(val text: String, val bitmaps: List<BitmapCue> = emptyList()) : EngineEvent
     data object Completed : EngineEvent
     data class Error(val message: String) : EngineEvent
 
@@ -85,6 +90,25 @@ interface PlayerEngine {
     suspend fun screenshot(): ByteArray? = null
 
     fun release()
+}
+
+/**
+ * An image subtitle, placed the way Media3's Cue describes it: [position] / [line] are fractions
+ * of the video's width / height where the [positionAnchor] / [lineAnchor] edge of the image sits,
+ * [size] its width as a fraction of the video width, [height] as a fraction of the video height
+ * (null = keep the image's aspect ratio). Identity equality: each cue is a new image.
+ */
+@Immutable
+class BitmapCue(
+    val bitmap: Bitmap,
+    val position: Float,
+    val positionAnchor: Anchor,
+    val line: Float,
+    val lineAnchor: Anchor,
+    val size: Float,
+    val height: Float?,
+) {
+    enum class Anchor { Start, Middle, End }
 }
 
 /** Creates the software fallback engine. Phase 7 binds the libmpv one; until then there is none. */

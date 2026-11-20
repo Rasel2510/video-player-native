@@ -16,9 +16,9 @@ import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
+import androidx.media3.common.text.Cue
 import androidx.media3.common.text.CueGroup
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.SeekParameters
 import com.ayesha.player.data.model.MediaTrack
@@ -29,6 +29,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlin.math.log10
 import kotlin.math.roundToInt
+import kotlin.math.roundToLong
 
 /**
  * Media3/ExoPlayer engine: ExoPlayerPlugin.ExoInstance from the Flutter build with the
@@ -46,7 +47,9 @@ class ExoPlayerEngine(context: Context) : PlayerEngine, Player.Listener {
 
     // Decoder fallback: if the preferred (hardware) decoder fails to initialise, e.g. 10-bit
     // HEVC on an 8-bit-only decoder, retry on another one instead of erroring out.
-    val player: ExoPlayer = ExoPlayer.Builder(context, DefaultRenderersFactory(context).setEnableDecoderFallback(true))
+    private val renderers = SubtitleDelayRenderersFactory(context).apply { setEnableDecoderFallback(true) }
+
+    val player: ExoPlayer = ExoPlayer.Builder(context, renderers)
         .setAudioAttributes(
             AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MOVIE).build(),
             /* handleAudioFocus = */ true,
@@ -65,8 +68,14 @@ class ExoPlayerEngine(context: Context) : PlayerEngine, Player.Listener {
         if (hasVideoTrack && !firstFrameRendered) emit(EngineEvent.VideoUnsupported)
     }
 
-    /** External subtitles accumulate, so a re-prepare keeps the ones already loaded. */
+    /**
+     * External subtitles of the current file. They accumulate, so a re-prepare keeps the ones
+     * already loaded; another file starts without them.
+     */
     private val externalSubs = ArrayList<MediaItem.SubtitleConfiguration>()
+
+    /** Label of the external subtitle just added: selected as soon as its track shows up. */
+    private var pendingExternalLabel: String? = null
     private var currentUri: String? = null
     private var lastIntent = false
     private var released = false
@@ -98,6 +107,11 @@ class ExoPlayerEngine(context: Context) : PlayerEngine, Player.Listener {
     }
 
     override fun open(path: String, startMs: Long, play: Boolean) {
+        if (path != currentUri) {
+            // Next/previous: the last episode's .srt must not come along.
+            externalSubs.clear()
+            pendingExternalLabel = null
+        }
         currentUri = path
         val item = MediaItem.Builder()
             .setUri(toUri(path))
@@ -199,20 +213,31 @@ class ExoPlayerEngine(context: Context) : PlayerEngine, Player.Listener {
             name.endsWith(".ttml") || name.endsWith(".dfxp") -> MimeTypes.APPLICATION_TTML
             else -> MimeTypes.APPLICATION_SUBRIP
         }
+        val id = "ext:${externalSubs.size}"
+        val label = nameHint?.takeIf { it.isNotBlank() } ?: "External ${externalSubs.size + 1}"
         externalSubs += MediaItem.SubtitleConfiguration.Builder(toUri(uri))
+            .setId(id)
             .setMimeType(mime)
-            .setLabel(nameHint)
+            .setLabel(label)
             .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
+            .build()
+        // The user wants to see this one: even if subtitles were off, or an embedded track was
+        // picked (its override would otherwise keep winning). Selected once its track exists.
+        pendingExternalLabel = label
+        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
             .build()
         // Re-prepare at the current position so the new subtitle is picked up.
         val pos = player.currentPosition
         val wasPlaying = player.playWhenReady
         currentUri?.let { open(it, pos, wasPlaying) }
-        return "ext:${externalSubs.size - 1}"
+        return id
     }
 
-    /** ExoPlayer has no subtitle delay; accepted as a no-op, as in the Flutter build. */
-    override fun setSubtitleDelay(seconds: Float) = Unit
+    /** Done by the text renderer wrapper (SubtitleDelay.kt): ExoPlayer has no setting for it. */
+    override fun setSubtitleDelay(seconds: Float) {
+        renderers.delayUs = (seconds * 1_000_000L).roundToLong()
+    }
 
     private fun playFromEndIfNeeded() {
         // play() at STATE_ENDED is a no-op: rewind so play after the end replays.
@@ -277,10 +302,14 @@ class ExoPlayerEngine(context: Context) : PlayerEngine, Player.Listener {
     }
 
     override fun onCues(cueGroup: CueGroup) {
-        emit(EngineEvent.Cues(cueGroup.cues.mapNotNull { it.text?.toString() }.joinToString("\n")))
+        val text = cueGroup.cues.mapNotNull { it.text?.toString() }.joinToString("\n")
+        // PGS / VobSub / DVB tracks carry images, not text.
+        val bitmaps = cueGroup.cues.mapNotNull(::toBitmapCue)
+        emit(EngineEvent.Cues(text, bitmaps))
     }
 
     override fun onTracksChanged(tracks: Tracks) {
+        selectPendingExternal(tracks)
         emit(EngineEvent.Tracks(snapshot(tracks)))
         hasVideoTrack = tracks.containsType(C.TRACK_TYPE_VIDEO)
         // No decoder at all for this video track: fall back now.
@@ -293,6 +322,42 @@ class ExoPlayerEngine(context: Context) : PlayerEngine, Player.Listener {
             main.removeCallbacks(videoWatchdog)
             main.postDelayed(videoWatchdog, 2500)
         }
+    }
+
+    private fun selectPendingExternal(tracks: Tracks) {
+        val label = pendingExternalLabel ?: return
+        val group = tracks.groups.lastOrNull { g ->
+            g.type == C.TRACK_TYPE_TEXT && (0 until g.length).any { g.getTrackFormat(it).label == label }
+        } ?: return
+        pendingExternalLabel = null
+        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+            .setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, 0))
+            .build()
+    }
+
+    /** Media3's placement for an image cue (as its SubtitlePainter does); null for text cues. */
+    private fun toBitmapCue(cue: Cue): BitmapCue? {
+        val bmp = cue.bitmap ?: return null
+        if (bmp.width <= 0 || bmp.height <= 0) return null
+        val hasPosition = cue.position != Cue.DIMEN_UNSET
+        val hasLine = cue.line != Cue.DIMEN_UNSET && cue.lineType == Cue.LINE_TYPE_FRACTION
+        return BitmapCue(
+            bitmap = bmp,
+            // Unplaced images go bottom-centre, like text.
+            position = if (hasPosition) cue.position else 0.5f,
+            positionAnchor = if (hasPosition) anchor(cue.positionAnchor) else BitmapCue.Anchor.Middle,
+            line = if (hasLine) cue.line else 0.95f,
+            lineAnchor = if (hasLine) anchor(cue.lineAnchor) else BitmapCue.Anchor.End,
+            size = if (cue.size != Cue.DIMEN_UNSET && cue.size > 0f) cue.size else 0.5f,
+            height = cue.bitmapHeight.takeIf { it != Cue.DIMEN_UNSET && it > 0f },
+        )
+    }
+
+    private fun anchor(type: Int) = when (type) {
+        Cue.ANCHOR_TYPE_MIDDLE -> BitmapCue.Anchor.Middle
+        Cue.ANCHOR_TYPE_END -> BitmapCue.Anchor.End
+        else -> BitmapCue.Anchor.Start
     }
 
     private fun snapshot(tracks: Tracks): TrackSnapshot {
@@ -351,7 +416,9 @@ class ExoPlayerEngine(context: Context) : PlayerEngine, Player.Listener {
             enhancer?.enabled = false
         }
         boostPercent = 100f
+        renderers.delayUs = 0
         externalSubs.clear()
+        pendingExternalLabel = null
         currentUri = null
         lastIntent = false
         hasVideoTrack = false

@@ -154,7 +154,7 @@ private fun TopBar(st: State<PlayerUiState>, style: PlayerControlsStyle, a: Play
     val accent = AppTheme.colors.accent
     val title = st.pick { it.title }
     val ab = st.pick { if (it.abRepeatStartMs == null) 0 else if (it.abRepeatEndMs == null) 1 else 2 }
-    val subsOn = st.pick { it.subtitlesEnabled && it.subtitleTracks.isNotEmpty() }
+    val subsOn = st.pick { it.subtitlesShowing }
     val speed = st.pick { it.playbackSpeed }
     // Bucketed: dragging the volume doesn't redraw the bar for every percent.
     val volume = st.pick {

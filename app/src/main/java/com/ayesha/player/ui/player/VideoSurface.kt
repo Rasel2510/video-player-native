@@ -11,6 +11,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -21,15 +22,19 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.viewinterop.AndroidView
 import com.ayesha.player.playback.FitMode
+import com.ayesha.player.playback.engine.BitmapCue
 import com.ayesha.player.playback.engine.PlayerEngine
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.resume
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 /** Pure fit math from player_video_layer.dart: the video's on-screen size for [fit]. */
 fun fitVideo(fit: FitMode, videoW: Float, videoH: Float, boxW: Float, boxH: Float): Pair<Float, Float> {
@@ -46,6 +51,44 @@ fun fitVideo(fit: FitMode, videoW: Float, videoH: Float, boxW: Float, boxH: Floa
         }
         FitMode.Contain -> if (va > ba) boxW to boxW / va else boxH * va to boxH
     }
+}
+
+/**
+ * Image subtitles placed as Media3's SubtitlePainter places them, in this box's coordinates
+ * (the video's displayed area).
+ */
+@Composable
+private fun BitmapCueLayer(cues: List<BitmapCue>) {
+    if (cues.isEmpty()) return
+    val density = LocalDensity.current
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val boxW = constraints.maxWidth.toFloat()
+        val boxH = constraints.maxHeight.toFloat()
+        for (cue in cues) {
+            key(cue) {
+                val image = remember(cue.bitmap) { cue.bitmap.asImageBitmap() }
+                val w = boxW * cue.size
+                val h = cue.height?.let { boxH * it } ?: (w * cue.bitmap.height / cue.bitmap.width)
+                val x = anchored(boxW * cue.position, w, cue.positionAnchor)
+                val y = anchored(boxH * cue.line, h, cue.lineAnchor)
+                Image(
+                    image,
+                    contentDescription = null,
+                    modifier = Modifier
+                        .offset { IntOffset(x.roundToInt(), y.roundToInt()) }
+                        .requiredSize(with(density) { w.toDp() }, with(density) { h.toDp() }),
+                    contentScale = ContentScale.FillBounds,
+                )
+            }
+        }
+    }
+}
+
+/** Left/top edge of a [length]-long span whose [anchor] edge sits at [at]. */
+private fun anchored(at: Float, length: Float, anchor: BitmapCue.Anchor) = when (anchor) {
+    BitmapCue.Anchor.Start -> at
+    BitmapCue.Anchor.Middle -> at - length / 2
+    BitmapCue.Anchor.End -> at - length
 }
 
 /**
@@ -124,6 +167,8 @@ fun VideoSurface(
     /** Pixels per dp: [videoWidth]/[videoHeight] are pixels, the layout is in dp. */
     density: Float,
     handle: VideoSurfaceHandle? = null,
+    /** Image subtitles, laid out over the video's own area so they follow fit mode and zoom. */
+    bitmapCues: List<BitmapCue> = emptyList(),
 ) {
     var surfaceHolder by remember { mutableStateOf<SurfaceHolder?>(null) }
     // The SurfaceView's callback outlives recompositions: always reach the current engine.
@@ -171,6 +216,8 @@ fun VideoSurface(
                 },
                 onRelease = { v -> handle?.let { if (it.view === v) it.view = null } },
             )
+            // Before the frozen still, which then covers them during the exit animation.
+            BitmapCueLayer(bitmapCues)
             if (handle != null && handle.frozen) {
                 // Drawn over the SurfaceView's hole, so the window shows this instead of the video.
                 val still = handle.frame

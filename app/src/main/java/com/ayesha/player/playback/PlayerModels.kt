@@ -3,6 +3,7 @@ package com.ayesha.player.playback
 import androidx.compose.runtime.Immutable
 import com.ayesha.player.data.model.MediaTrack
 import com.ayesha.player.data.model.VideoFile
+import com.ayesha.player.playback.engine.BitmapCue
 
 /** Persisted by ordinal (player_fit_mode_v1): keep the order. */
 enum class FitMode(val label: String) {
@@ -83,6 +84,8 @@ data class PlayerUiState(
     val zoomScale: Float = 1f,
     val loopMode: LoopMode = LoopMode.None,
     val currentCue: String = "",
+    /** Image subtitles (PGS / VobSub / DVB) showing now, drawn over the video. */
+    val bitmapCues: List<BitmapCue> = emptyList(),
     val videoWidth: Int = 16,
     val videoHeight: Int = 9,
     /** Wall-clock end of the sleep timer (epoch ms), or null. */
@@ -109,6 +112,9 @@ data class PlayerUiState(
 
     val hasPrevious: Boolean get() = currentIndex > 0
     val hasNext: Boolean get() = currentIndex >= 0 && currentIndex < folderVideos.size - 1
+
+    /** Subtitles are on and a track is actually selected (what the sheet's ON/OFF shows). */
+    val subtitlesShowing: Boolean get() = subtitlesEnabled && selectedSubtitleTrack != null
     val currentVideo: VideoFile? get() = folderVideos.getOrNull(currentIndex)
     val nextVideo: VideoFile? get() = if (hasNext) folderVideos[currentIndex + 1] else null
     val title: String get() = currentVideo?.name ?: fileName

@@ -274,7 +274,7 @@ fun SubtitleSheet(
         HorizontalDivider(color = c.divider)
         if (tracks.isEmpty()) {
             Text(
-                "No subtitle tracks in this file.\nLoad an external .srt file using the button below.",
+                "No subtitle tracks in this file.\nLoad a subtitle file (.srt, .vtt, .ass) using the button below.",
                 Modifier.fillMaxWidth().padding(24.dp),
                 textAlign = TextAlign.Center,
                 color = c.textMuted,
@@ -283,7 +283,8 @@ fun SubtitleSheet(
             )
         } else {
             tracks.forEachIndexed { i, t ->
-                val label = t.title?.takeIf { it.isNotEmpty() } ?: t.language?.takeIf { it.isNotEmpty() } ?: "Track ${i + 1}"
+                // "English", not "eng" (as the audio sheet does); no "Default" for a lone subtitle.
+                val label = t.title?.trim()?.takeIf { it.isNotEmpty() } ?: TrackLabels.languageName(t.language) ?: "Track ${i + 1}"
                 TrackRow(Icons.Rounded.Subtitles, label, enabled && selected?.id == t.id, radio = true) { closer.close { onSelect(t) } }
             }
         }

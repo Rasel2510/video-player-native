@@ -22,7 +22,8 @@ import kotlin.math.roundToLong
  * Software engine on libmpv + FFmpeg: the fallback for files the device's MediaCodec can't
  * decode (media_kit_engine.dart). Decoding is forced to software (hwdec=no), since hardware
  * decoding is exactly what failed. mpv's own subtitle rendering is hidden; cues are forwarded
- * as text to the app's styled overlay, as with ExoPlayer.
+ * as text to the app's styled overlay, as with ExoPlayer. Image subtitles (PGS etc.) have no
+ * text, so for those mpv draws them itself.
  *
  * mpv calls the observer on its own thread; everything is re-posted to the main thread.
  */
@@ -191,7 +192,10 @@ class MpvEngine(private val context: Context) : PlayerEngine, MPVLib.EventObserv
 
     // ── mpv events (mpv thread -> main) ──────────────────────────────────────
 
-    override fun eventProperty(property: String) = Unit
+    /** A property became unavailable. For sub-text (no track, file change) the last cue must go. */
+    override fun eventProperty(property: String) {
+        if (property == "sub-text") main.post { emit(EngineEvent.Cues("")) }
+    }
 
     override fun eventProperty(property: String, value: Long) {
         main.post {
@@ -288,6 +292,7 @@ class MpvEngine(private val context: Context) : PlayerEngine, MPVLib.EventObserv
         val subs = ArrayList<MediaTrack>()
         var activeAudio: String? = null
         var activeSub: String? = null
+        var activeSubIsImage = false
         for (i in 0 until count) {
             val type = mpv.getPropertyString("track-list/$i/type") ?: continue
             val id = mpv.getPropertyInt("track-list/$i/id")?.toString() ?: continue
@@ -300,11 +305,30 @@ class MpvEngine(private val context: Context) : PlayerEngine, MPVLib.EventObserv
                 }
                 "sub" -> {
                     subs += t
-                    if (selected) activeSub = id
+                    if (selected) {
+                        activeSub = id
+                        activeSubIsImage = isImageSubtitle(mpv.getPropertyString("track-list/$i/codec"))
+                    }
                 }
             }
         }
+        // Image subtitles have no text for the app's overlay: let mpv draw those itself.
+        setMpvDrawsSubtitles(activeSubIsImage)
         emit(EngineEvent.Tracks(TrackSnapshot(audio, subs, activeAudio, activeSub)))
+    }
+
+    private var mpvDrawsSubtitles = false
+
+    private fun setMpvDrawsSubtitles(on: Boolean) {
+        if (on == mpvDrawsSubtitles) return
+        mpvDrawsSubtitles = on
+        runCatching { mpv.setPropertyBoolean("sub-visibility", on) }
+    }
+
+    /** FFmpeg codec names of bitmap subtitle formats (Blu-ray PGS, DVD VobSub, DVB, DivX XSUB). */
+    private fun isImageSubtitle(codec: String?): Boolean {
+        val c = codec?.lowercase() ?: return false
+        return "pgs" in c || "dvd_sub" in c || "dvb_sub" in c || "vobsub" in c || c == "xsub"
     }
 
     private fun emit(e: EngineEvent) {
