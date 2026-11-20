@@ -3,11 +3,12 @@ package com.ayesha.player.data.library
 import android.content.Context
 import android.media.MediaScannerConnection
 import com.ayesha.player.core.util.PathUtil
-import com.ayesha.player.data.media.DurationRepository
-import com.ayesha.player.data.media.ThumbnailRepository
 import com.ayesha.player.data.model.VideoFile
+import com.ayesha.player.di.ApplicationScope
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
@@ -54,32 +55,47 @@ sealed interface RenameResult {
 data class TransferResult(val succeeded: Int, val skipped: Int, val movedPaths: List<String>)
 
 /**
- * File actions from folder_videos_screen.dart. Each one also keeps the caches consistent:
- * a rename or move carries the resume point, duration and thumbnail over to the new path;
- * a delete drops them.
+ * File actions from folder_videos_screen.dart. Each one also keeps the caches consistent
+ * ([VideoCaches]): a rename or move carries the resume point, duration and thumbnail over to
+ * the new path; a delete drops them all, recents entry included.
  */
 @Singleton
 class FileOperations @Inject constructor(
     @ApplicationContext private val context: Context,
     private val library: LibraryRepository,
     private val history: PlaybackHistory,
-    private val durations: DurationRepository,
-    private val thumbnails: ThumbnailRepository,
+    private val caches: VideoCaches,
+    @ApplicationScope private val scope: CoroutineScope,
 ) {
-    /** Deletes files (missing ones count as gone) and returns the paths now absent. */
-    suspend fun delete(paths: Collection<String>): List<String> = withContext(Dispatchers.IO) {
-        val gone = paths.filter { p ->
-            val f = File(p)
-            try {
-                !f.exists() || f.delete()
-            } catch (_: SecurityException) {
-                false
-            }
+    /**
+     * Deletes files (missing ones count as gone) and returns the paths now absent.
+     *
+     * The videos leave the library first, so their rows vanish on the next frame instead of
+     * after the disk and cache work; any file that couldn't be deleted is put back. The work
+     * runs in the app scope: the folder screen closes as soon as its last video leaves the
+     * list, and that mustn't cancel a delete halfway (files gone, caches left behind).
+     */
+    suspend fun delete(paths: Collection<String>): List<String> {
+        val targets = paths.distinct()
+        if (targets.isEmpty()) return emptyList()
+        library.removeVideos(targets, deleting = true)
+        return scope.async(Dispatchers.IO) {
+            val gone = targets.filter(::deleteFile)
+            val goneSet = gone.toHashSet()
+            library.finishDelete(gone, failed = targets.filterNot { it in goneSet })
+            caches.forget(gone)
+            rescan(gone)
+            gone
+        }.await()
+    }
+
+    private fun deleteFile(path: String): Boolean {
+        val f = File(path)
+        return try {
+            !f.exists() || f.delete()
+        } catch (_: SecurityException) {
+            false
         }
-        gone.forEach { forget(it) }
-        library.removeVideos(gone)
-        rescan(gone)
-        gone
     }
 
     suspend fun rename(video: VideoFile, newBaseName: String): RenameResult = withContext(Dispatchers.IO) {
@@ -98,7 +114,7 @@ class FileOperations @Inject constructor(
         }
         if (!ok) return@withContext RenameResult.Failed
 
-        carryOver(video.path, newPath)
+        caches.carryOver(video.path, newPath)
         val renamed = video.copy(path = newPath, name = newName)
         library.renameVideo(video.path, renamed)
         rescan(listOf(video.path, newPath))
@@ -130,7 +146,7 @@ class FileOperations @Inject constructor(
                             src.copyTo(target)
                             if (!src.delete()) throw IOException("copied but couldn't delete ${v.path}")
                         }
-                        carryOver(v.path, target.path)
+                        caches.carryOver(v.path, target.path)
                         moved += v.path
                     } else {
                         src.copyTo(target)
@@ -155,18 +171,6 @@ class FileOperations @Inject constructor(
 
     suspend fun clearResume(paths: Collection<String>) {
         paths.forEach { history.clearPosition(it) }
-    }
-
-    private suspend fun carryOver(oldPath: String, newPath: String) {
-        history.renamePosition(oldPath, newPath)
-        durations.rename(oldPath, newPath)
-        thumbnails.rename(oldPath, newPath)
-    }
-
-    private suspend fun forget(path: String) {
-        history.clearPosition(path)
-        thumbnails.remove(path)
-        durations.remove(path)
     }
 
     /** Lets MediaStore index the change now, instead of whenever it next notices on its own. */

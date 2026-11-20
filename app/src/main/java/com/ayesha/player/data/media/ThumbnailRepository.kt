@@ -153,9 +153,15 @@ class ThumbnailRepository @Inject constructor(
                 null
             } else {
                 writeAtomically(target, bytes)
-                resolved[videoPath] = target
-                failures.remove(videoPath)
-                target
+                if (sourceGone(videoPath)) {
+                    // Deleted while this ran: remove() has been and gone, so no orphan JPEG.
+                    target.delete()
+                    null
+                } else {
+                    resolved[videoPath] = target
+                    failures.remove(videoPath)
+                    target
+                }
             }
         }
     } catch (_: Exception) {
@@ -206,13 +212,24 @@ class ThumbnailRepository @Inject constructor(
         }
     }
 
-    suspend fun remove(videoPath: String) = withContext(Dispatchers.IO) {
-        evictBitmaps(videoPath)
-        resolved.remove(videoPath)
-        failures.remove(videoPath)
-        cacheFileFor(videoPath).delete()
-        Unit
+    suspend fun remove(videoPath: String) = removeAll(listOf(videoPath))
+
+    /** Deleted videos: their JPEGs on disk and their decoded bitmaps in memory. */
+    suspend fun removeAll(videoPaths: Collection<String>) = withContext(Dispatchers.IO) {
+        if (videoPaths.isEmpty()) return@withContext
+        val gone = videoPaths.toHashSet()
+        // One pass over the bitmap cache for the whole batch, not one per video.
+        bitmaps.snapshot().keys.filter { it.substringBeforeLast('|').substringBeforeLast('|') in gone }
+            .forEach { bitmaps.remove(it) }
+        for (p in gone) {
+            resolved.remove(p)
+            failures.remove(p)
+            cacheFileFor(p).delete()
+        }
     }
+
+    /** Only local files can be checked; content URIs are left alone. */
+    private fun sourceGone(videoPath: String) = videoPath.startsWith('/') && !File(videoPath).exists()
 
     /** Moves a renamed file's thumbnail instead of regenerating it. */
     suspend fun rename(oldPath: String, newPath: String) = withContext(Dispatchers.IO) {

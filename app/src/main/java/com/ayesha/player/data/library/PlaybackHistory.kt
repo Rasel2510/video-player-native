@@ -95,6 +95,14 @@ class PlaybackHistory @Inject constructor(
         io { recents.addAndTrim(RecentEntity.from(video, System.currentTimeMillis()), MAX_RECENTS) }
 
     suspend fun removeRecent(path: String) = io { recents.delete(path) }
+
+    /** Deleted files: their resume points and recents entries go, a few statements for any count. */
+    suspend fun forget(paths: List<String>) = io {
+        paths.chunked(SQL_CHUNK).forEach { chunk ->
+            positions.deleteChunk(chunk)
+            recents.deleteChunk(chunk)
+        }
+    }
     suspend fun clearRecents() = io { recents.clear() }
 
     // ── Joins ────────────────────────────────────────────────────────────────

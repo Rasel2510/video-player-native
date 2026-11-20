@@ -6,8 +6,11 @@ import com.ayesha.player.core.util.PathUtil
 import com.ayesha.player.data.db.VaultDao
 import com.ayesha.player.data.db.VaultEntryEntity
 import com.ayesha.player.data.library.LibraryRepository
+import com.ayesha.player.data.library.VideoCaches
 import com.ayesha.player.data.model.VideoFile
+import com.ayesha.player.di.ApplicationScope
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -15,6 +18,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
@@ -37,6 +41,8 @@ class VaultRepository @Inject constructor(
     @ApplicationContext private val context: Context,
     private val dao: VaultDao,
     private val library: LibraryRepository,
+    private val caches: VideoCaches,
+    @ApplicationScope private val scope: CoroutineScope,
 ) {
     private val dir: File by lazy { File(context.filesDir, "vault").apply { mkdirs() } }
     private val slots = Semaphore(2)
@@ -125,16 +131,29 @@ class VaultRepository @Inject constructor(
         }
     }
 
-    /** Permanent. */
-    suspend fun delete(videos: List<VideoFile>) {
-        withContext(Dispatchers.IO) {
-            val done = videos.filter { v ->
-                val f = File(v.path)
-                !f.exists() || f.delete()
-            }.map { it.path }
+    /**
+     * Permanent; returns how many are gone. They leave the list at once; the files, their vault
+     * entries and their caches (thumbnail, duration, resume point) follow, in the app scope so
+     * leaving the vault can't cut it short. The reload brings back any file that couldn't go.
+     */
+    suspend fun delete(videos: List<VideoFile>): Int {
+        if (videos.isEmpty()) return 0
+        val paths = videos.map { it.path }.toHashSet()
+        _videos.update { list -> list.filterNot { it.path in paths } }
+        return scope.async(Dispatchers.IO) {
+            val done = paths.filter { p ->
+                val f = File(p)
+                try {
+                    !f.exists() || f.delete()
+                } catch (_: SecurityException) {
+                    false
+                }
+            }
             if (done.isNotEmpty()) dao.deleteAll(done)
-        }
-        load()
+            load()
+            caches.forget(done)
+            done.size
+        }.await()
     }
 
     /** rename(), or copy + delete across volumes (SD card <-> internal). */

@@ -105,7 +105,10 @@ class VaultViewModel @Inject constructor(
 
     fun delete(list: List<VideoFile>) {
         exitSelection()
-        viewModelScope.launch { vault.delete(list) }
+        viewModelScope.launch {
+            val n = vault.delete(list)
+            if (n < list.size) _messages.send("Couldn't delete ${list.size - n} video(s)")
+        }
     }
 
     fun selectedVideos() = videos.value.filter { it.path in selected }

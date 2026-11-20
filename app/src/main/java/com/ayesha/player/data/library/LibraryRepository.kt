@@ -33,6 +33,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.util.concurrent.atomic.AtomicInteger
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -88,6 +89,17 @@ class LibraryRepository @Inject constructor(
     private var refreshPending = false
     private var scanMode = LibraryScanMode.Hybrid
     private var lastFilesystemScanMs: Long? = null
+
+    // Tombstones. MediaStore can lag behind a file operation (older Android, SD cards), and one
+    // refresh in that gap would bring a deleted video back, so removed paths are remembered.
+    /** Delete still running: hidden even though the file is still there. Value = entry to put back if it fails. */
+    private val pendingDeletes = HashMap<String, VideoFile>()
+
+    /**
+     * Deleted, moved or vaulted: hidden while the file stays gone. Dropped once MediaStore
+     * forgets the path, or the file is back (downloaded again under the same name).
+     */
+    private val removed = HashSet<String>()
 
     /** Set when the app goes to the background; the next library screen resume reloads once. */
     @Volatile private var staleAfterBackground = false
@@ -166,10 +178,20 @@ class LibraryRepository @Inject constructor(
         }
     }
 
-    /** Drops deleted videos without a rescan and updates the cache. */
-    fun removeVideos(videoPaths: Collection<String>) {
+    /**
+     * Drops videos without a rescan and updates the cache. [deleting]: the files are about to be
+     * deleted rather than already gone, so the rows vanish before the disk work starts; call
+     * [finishDelete] once it's done.
+     */
+    fun removeVideos(videoPaths: Collection<String>, deleting: Boolean = false) {
         val gone = videoPaths.toHashSet()
+        if (gone.isEmpty()) return
         scope.launch(serial) {
+            if (deleting) {
+                s.folders.forEach { f -> f.videos.forEach { if (it.path in gone) pendingDeletes[it.path] = it } }
+            } else {
+                removed += gone
+            }
             val folders = s.folders
                 .map { f -> VideoFolder(f.path, f.videos.filterNot { it.path in gone }) }
                 .filter { it.videos.isNotEmpty() }
@@ -180,6 +202,18 @@ class LibraryRepository @Inject constructor(
     }
 
     fun removeVideo(videoPath: String) = removeVideos(listOf(videoPath))
+
+    /** The delete begun by removeVideos(deleting = true) is over; [failed] videos come back. */
+    fun finishDelete(gone: Collection<String>, failed: Collection<String>) {
+        scope.launch(serial) {
+            gone.forEach {
+                pendingDeletes.remove(it)
+                removed += it
+            }
+            val restore = failed.mapNotNull { pendingDeletes.remove(it) }
+            if (restore.isNotEmpty()) insertNow(restore)
+        }
+    }
 
     /** Swaps in a renamed file without a rescan. */
     fun renameVideo(oldPath: String, renamed: VideoFile) {
@@ -199,14 +233,20 @@ class LibraryRepository @Inject constructor(
      */
     fun insertVideos(videos: Collection<VideoFile>) {
         if (videos.isEmpty()) return
-        scope.launch(serial) {
-            val all = LinkedHashMap<String, VideoFile>()
-            s.folders.forEach { f -> f.videos.forEach { all[it.path] = it } }
-            videos.forEach { all[it.path] = it }
-            val folders = LibraryGrouping.groupByFolder(all.values)
-            _state.update { it.copy(folders = folders) }
-            saveCache(folders)
+        scope.launch(serial) { insertNow(videos) }
+    }
+
+    private suspend fun insertNow(videos: Collection<VideoFile>) {
+        val all = LinkedHashMap<String, VideoFile>()
+        s.folders.forEach { f -> f.videos.forEach { all[it.path] = it } }
+        videos.forEach {
+            all[it.path] = it
+            pendingDeletes.remove(it.path)
+            removed.remove(it.path)
         }
+        val folders = LibraryGrouping.groupByFolder(all.values)
+        _state.update { it.copy(folders = folders) }
+        saveCache(folders)
     }
 
     /**
@@ -259,6 +299,7 @@ class LibraryRepository @Inject constructor(
             }
 
             val videos = mediaStore.queryVideos()
+            pruneTombstones(videos)
             // MediaStore already knows each indexed video's duration: no probe needed for those.
             durations.seed(videos)
             val mediaByPath = LinkedHashMap<String, VideoFile>().apply { videos.forEach { put(it.path, it) } }
@@ -345,20 +386,47 @@ class LibraryRepository @Inject constructor(
 
     /** Commits only when the set of videos changed, so a no-op rescan doesn't flicker or rewrite. */
     private suspend fun applyFoldersIfChanged(merged: List<VideoFolder>) {
-        if (LibraryGrouping.sameVideoSet(s.folders, merged)) {
+        val visible = withoutRemoved(merged)
+        if (LibraryGrouping.sameVideoSet(s.folders, visible)) {
             _state.update { it.copy(isScanning = false, fromCache = false, hasLoaded = true) }
             return
         }
-        applyFolders(merged)
+        applyFolders(visible)
     }
 
     private suspend fun applyFolders(merged: List<VideoFolder>) {
-        val badges = LibraryGrouping.computeBadges(merged, loadSeen(), sessionSeen)
+        val seen = loadSeen()
+        // Filtered after the suspension: a delete may have started while the seen set loaded.
+        val folders = withoutRemoved(merged)
+        val badges = LibraryGrouping.computeBadges(folders, seen, sessionSeen)
         _state.update {
-            it.copy(folders = merged, isScanning = false, fromCache = false, newPaths = badges.newPaths, hasLoaded = true)
+            it.copy(folders = folders, isScanning = false, fromCache = false, newPaths = badges.newPaths, hasLoaded = true)
         }
         saveSeen(badges.seenToPersist)
-        saveCache(merged)
+        saveCache(folders)
+    }
+
+    // ── Tombstones ───────────────────────────────────────────────────────────
+
+    private fun isTombstoned(path: String) = path in pendingDeletes || path in removed
+
+    private fun isRemoved(path: String) = path in pendingDeletes || (path in removed && !File(path).exists())
+
+    /** [folders] minus the videos the user just deleted, moved or vaulted. */
+    private fun withoutRemoved(folders: List<VideoFolder>): List<VideoFolder> {
+        if (pendingDeletes.isEmpty() && removed.isEmpty()) return folders
+        return folders.mapNotNull { f ->
+            if (f.videos.none { isTombstoned(it.path) }) return@mapNotNull f
+            val kept = f.videos.filterNot { isRemoved(it.path) }
+            if (kept.isEmpty()) null else VideoFolder(f.path, kept)
+        }
+    }
+
+    /** Forgets finished removals that MediaStore has caught up with, and paths whose file is back. */
+    private fun pruneTombstones(indexed: List<VideoFile>) {
+        if (removed.isEmpty()) return
+        val listed = indexed.asSequence().map { it.path }.filter { it in removed }.toHashSet()
+        removed.removeAll { it !in listed || File(it).exists() }
     }
 
     private suspend fun showCache(cached: List<VideoFolder>, roots: List<String>) {

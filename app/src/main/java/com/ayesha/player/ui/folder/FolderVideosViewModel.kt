@@ -251,12 +251,14 @@ class FolderVideosViewModel @Inject constructor(
 
     // ── File actions ─────────────────────────────────────────────────────────
 
+    /** The rows go at once (the library drops them before the disk work); failures come back. */
     fun delete(paths: Collection<String>) {
+        val targets = paths.toList() // [paths] may be the selection, cleared just below
+        exitSelection()
         viewModelScope.launch {
-            val gone = fileOps.delete(paths)
+            val gone = fileOps.delete(targets)
             forgetLocally(gone)
-            if (gone.size < paths.size) _messages.send("Couldn't delete ${paths.size - gone.size} video(s)")
-            exitSelection()
+            if (gone.size < targets.size) _messages.send("Couldn't delete ${targets.size - gone.size} video(s)")
         }
     }
 

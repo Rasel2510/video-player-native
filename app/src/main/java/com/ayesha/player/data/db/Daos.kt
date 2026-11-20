@@ -24,6 +24,9 @@ interface PositionDao {
     @Query("DELETE FROM positions WHERE path = :path")
     suspend fun delete(path: String)
 
+    @Query("DELETE FROM positions WHERE path IN (:paths)")
+    suspend fun deleteChunk(paths: List<String>)
+
     /** Write the new key first, drop the old one only after (same order as PositionService.rename). */
     @Transaction
     suspend fun rename(oldPath: String, newPath: String, now: Long) {
@@ -47,6 +50,9 @@ interface DurationDao {
     @Query("DELETE FROM durations WHERE path = :path")
     suspend fun delete(path: String)
 
+    @Query("DELETE FROM durations WHERE path IN (:paths)")
+    suspend fun deleteChunk(paths: List<String>)
+
     @Transaction
     suspend fun rename(oldPath: String, newPath: String) {
         val ms = get(oldPath) ?: return
@@ -68,6 +74,9 @@ interface RecentDao {
 
     @Query("DELETE FROM recents WHERE path = :path")
     suspend fun delete(path: String)
+
+    @Query("DELETE FROM recents WHERE path IN (:paths)")
+    suspend fun deleteChunk(paths: List<String>)
 
     @Query("DELETE FROM recents")
     suspend fun clear()

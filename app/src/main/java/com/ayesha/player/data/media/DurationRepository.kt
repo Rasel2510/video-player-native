@@ -113,7 +113,8 @@ class DurationRepository @Inject constructor(
         return probeSlots.withPermit {
             try {
                 val d = readHeaderDuration(path) ?: softwareProbe.probeDuration(path)
-                if (d != null && d.isPositive()) save(path, d)
+                // Re-checked: a file deleted mid-probe mustn't get its row written back.
+                if (d != null && d.isPositive() && File(path).exists()) save(path, d)
                 d
             } catch (_: Exception) {
                 null
@@ -148,6 +149,11 @@ class DurationRepository @Inject constructor(
     suspend fun remove(path: String) {
         mem.remove(path)
         withContext(Dispatchers.IO) { dao.delete(path) }
+    }
+
+    suspend fun removeAll(paths: List<String>) {
+        paths.forEach { mem.remove(it) }
+        withContext(Dispatchers.IO) { paths.chunked(SQL_CHUNK).forEach { dao.deleteChunk(it) } }
     }
 
     /** Keeps a renamed file's duration so it isn't probed again. */
