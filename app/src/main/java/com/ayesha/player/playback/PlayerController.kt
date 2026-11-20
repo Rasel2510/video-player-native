@@ -259,6 +259,7 @@ class PlayerController @Inject constructor(
         // Carry the subtitle state over: the new engine would otherwise start with its defaults.
         software.setSubtitleDelay(s.subtitleDelay)
         if (!s.subtitlesEnabled) software.selectSubtitleTrack(null)
+        software.setPictureInPicture(s.isPipMode)
         software.open(path, resumeAt, play = true)
     }
 
@@ -485,6 +486,8 @@ class PlayerController @Inject constructor(
                 subtitleDelay = 0f,
                 currentCue = "",
                 bitmapCues = emptyList(),
+                // Track ids are positional ("g0:t1"): the pick would land on another language here.
+                selectedSubtitleTrack = null,
                 abRepeatStartMs = null,
                 abRepeatEndMs = null,
                 hasEnded = false,
@@ -838,7 +841,10 @@ class PlayerController @Inject constructor(
 
     // ── PiP / mini player / audio mode / leaving ─────────────────────────────
 
-    fun setPipMode(pip: Boolean) = set { copy(isPipMode = pip) }
+    fun setPipMode(pip: Boolean) {
+        _engine.value?.setPictureInPicture(pip)
+        set { copy(isPipMode = pip) }
+    }
 
     fun enableAudioMode() = set { copy(audioMode = true) }
 

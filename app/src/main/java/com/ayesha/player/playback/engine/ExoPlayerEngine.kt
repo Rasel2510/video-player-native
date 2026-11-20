@@ -197,6 +197,8 @@ class ExoPlayerEngine(context: Context) : PlayerEngine, Player.Listener {
     override fun selectSubtitleTrack(id: String?) = selectOrDisable(id, C.TRACK_TYPE_TEXT)
 
     private fun selectOrDisable(id: String?, type: Int) {
+        // The user chose (or turned off) a subtitle since loading a file: that choice wins.
+        if (type == C.TRACK_TYPE_TEXT) pendingExternalLabel = null
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
             .setTrackTypeDisabled(type, id == null)
             .build()

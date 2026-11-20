@@ -54,6 +54,8 @@ class PlaybackHistory @Inject constructor(
     suspend fun savePosition(path: String, position: Duration, duration: Duration) {
         val ms = position.inWholeMilliseconds
         val total = duration.inWholeMilliseconds
+        // Deleted while still playing (mini player): its rows were just cleared, don't write them back.
+        if (isDeletedFile(path)) return
         when (PositionRules.actionFor(ms, total)) {
             PositionRules.Action.Ignore -> Unit
             PositionRules.Action.Clear -> io { positions.delete(path) }
@@ -134,6 +136,9 @@ class PlaybackHistory @Inject constructor(
     }
 
     private suspend fun <T> io(block: suspend () -> T): T = withContext(Dispatchers.IO) { block() }
+
+    /** Only local files can be checked; content URIs ("Open with") count as present. */
+    private suspend fun isDeletedFile(path: String) = path.startsWith('/') && io { !File(path).exists() }
 
     private companion object {
         const val MAX_RECENTS = 20

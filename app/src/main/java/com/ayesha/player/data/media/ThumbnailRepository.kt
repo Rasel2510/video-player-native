@@ -92,7 +92,11 @@ class ThumbnailRepository @Inject constructor(
         bitmaps.get(key)?.let { return it }
         val file = getThumbnail(videoPath) ?: return null
         return withContext(decodeDispatcher) {
-            decodeCover(file, w, h)?.also { bitmaps.put(key, it) }
+            decodeCover(file, w, h)?.also {
+                // Not if the video was removed while this decoded: removeAll has already evicted,
+                // and a later file at the same path would get this picture.
+                if (resolved[videoPath] == file) bitmaps.put(key, it)
+            }
         }
     }
 
@@ -198,7 +202,8 @@ class ThumbnailRepository @Inject constructor(
      * from the playing software engine instead of opening a second decoder), then notifies lists.
      */
     suspend fun store(videoPath: String, bytes: ByteArray): File? = withContext(Dispatchers.IO) {
-        if (bytes.isEmpty()) return@withContext null
+        // A frame from a player still holding a deleted file mustn't recreate its thumbnail.
+        if (bytes.isEmpty() || sourceGone(videoPath)) return@withContext null
         try {
             val target = cacheFileFor(videoPath)
             writeAtomically(target, bytes)

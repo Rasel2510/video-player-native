@@ -26,6 +26,7 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
+import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -66,9 +67,13 @@ class VaultRepository @Inject constructor(
                 }
             }
             if (gone.isNotEmpty()) dao.deleteAll(gone)
-            _videos.value = list.sortedBy { it.name.lowercase() }
+            // A delete in progress already took these off the list: a reload mustn't put them back.
+            _videos.value = list.filterNot { it.path in deleting }.sortedBy { it.name.lowercase() }
         }
     }
+
+    /** Vault paths being deleted right now. */
+    private val deleting: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
     /** Moves videos into the vault; returns how many made it. The library drops them at once. */
     suspend fun add(videos: List<VideoFile>): Int {
@@ -139,20 +144,30 @@ class VaultRepository @Inject constructor(
     suspend fun delete(videos: List<VideoFile>): Int {
         if (videos.isEmpty()) return 0
         val paths = videos.map { it.path }.toHashSet()
+        deleting += paths
         _videos.update { list -> list.filterNot { it.path in paths } }
         return scope.async(Dispatchers.IO) {
-            val done = paths.filter { p ->
-                val f = File(p)
-                try {
-                    !f.exists() || f.delete()
-                } catch (_: SecurityException) {
-                    false
+            try {
+                // Caches made before vaulting are still keyed by the original path (moveIn keeps
+                // them there so a restore finds them): those go too, unless a new file is there now.
+                val originals = paths.associateWith { dao.originalFor(it) }
+                val done = paths.filter { p ->
+                    val f = File(p)
+                    try {
+                        !f.exists() || f.delete()
+                    } catch (_: SecurityException) {
+                        false
+                    }
                 }
+                if (done.isNotEmpty()) dao.deleteAll(done)
+                val orphaned = done.mapNotNull { originals[it] }.filterNot { File(it).exists() }
+                caches.forget(done + orphaned)
+                done.size
+            } finally {
+                deleting -= paths
+                // Brings back anything that couldn't be deleted.
+                load()
             }
-            if (done.isNotEmpty()) dao.deleteAll(done)
-            load()
-            caches.forget(done)
-            done.size
         }.await()
     }
 

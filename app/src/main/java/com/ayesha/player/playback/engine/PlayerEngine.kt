@@ -86,6 +86,9 @@ interface PlayerEngine {
     /** Subtitle timing offset in seconds (+ later). Engines that can't shift cues ignore it. */
     fun setSubtitleDelay(seconds: Float)
 
+    /** Picture-in-picture shows only the raw video: an engine drawing subtitles itself hides them. */
+    fun setPictureInPicture(pip: Boolean) = Unit
+
     /** A JPEG of the current frame (software engine only, for files with no thumbnail). */
     suspend fun screenshot(): ByteArray? = null
 

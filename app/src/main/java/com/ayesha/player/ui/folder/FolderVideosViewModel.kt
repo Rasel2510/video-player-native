@@ -115,6 +115,18 @@ class FolderVideosViewModel @Inject constructor(
 
     private var lastOpenedPath: String? = null
     private val loadedPaths = HashSet<String>()
+    private var hadVideos = false
+
+    /**
+     * Deletes still running. Their rows leave the list before the disk work, so the folder can
+     * look empty while a failed delete is about to bring videos back: don't close until it's known.
+     */
+    private var deletesInFlight = 0
+
+    private fun closeIfEmptied() {
+        // The library's current state, not [folder]: that flow can trail it by a dispatch.
+        if (hadVideos && deletesInFlight == 0 && library.folder(folderPath)?.videos.isNullOrEmpty()) _closeEvents.trySend(Unit)
+    }
 
     val listing: StateFlow<FolderListing> = combine(folder, _sortBy, _durations, appliedQuery) { f, sort, durs, q ->
         val base = f?.videos.orEmpty()
@@ -133,10 +145,9 @@ class FolderVideosViewModel @Inject constructor(
             _sortBy.value = SortOption.entries.getOrElse(prefs.current().sortByIndex) { SortOption.Name }
         }
         viewModelScope.launch {
-            var hadVideos = false
             folder.collect { f ->
                 if (f == null || f.videos.isEmpty()) {
-                    if (hadVideos) _closeEvents.send(Unit)
+                    closeIfEmptied()
                     return@collect
                 }
                 hadVideos = true
@@ -255,10 +266,17 @@ class FolderVideosViewModel @Inject constructor(
     fun delete(paths: Collection<String>) {
         val targets = paths.toList() // [paths] may be the selection, cleared just below
         exitSelection()
+        deletesInFlight++
         viewModelScope.launch {
-            val gone = fileOps.delete(targets)
-            forgetLocally(gone)
-            if (gone.size < targets.size) _messages.send("Couldn't delete ${targets.size - gone.size} video(s)")
+            try {
+                val gone = fileOps.delete(targets)
+                forgetLocally(gone)
+                if (gone.size < targets.size) _messages.send("Couldn't delete ${targets.size - gone.size} video(s)")
+            } finally {
+                deletesInFlight--
+                // Failed videos are back in the list by now (finishDelete is applied before delete returns).
+                closeIfEmptied()
+            }
         }
     }
 

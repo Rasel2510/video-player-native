@@ -203,21 +203,25 @@ class LibraryRepository @Inject constructor(
 
     fun removeVideo(videoPath: String) = removeVideos(listOf(videoPath))
 
-    /** The delete begun by removeVideos(deleting = true) is over; [failed] videos come back. */
-    fun finishDelete(gone: Collection<String>, failed: Collection<String>) {
-        scope.launch(serial) {
-            gone.forEach {
-                pendingDeletes.remove(it)
-                removed += it
-            }
-            val restore = failed.mapNotNull { pendingDeletes.remove(it) }
-            if (restore.isNotEmpty()) insertNow(restore)
+    /**
+     * The delete begun by removeVideos(deleting = true) is over; [failed] videos come back.
+     * Returns once applied, so the caller sees the restored rows.
+     */
+    suspend fun finishDelete(gone: Collection<String>, failed: Collection<String>) = withContext(serial) {
+        gone.forEach {
+            pendingDeletes.remove(it)
+            removed += it
         }
+        val restore = failed.mapNotNull { pendingDeletes.remove(it) }
+        if (restore.isNotEmpty()) insertNow(restore)
     }
 
-    /** Swaps in a renamed file without a rescan. */
+    /** Swaps in a renamed file without a rescan (the old path is tombstoned like a removal). */
     fun renameVideo(oldPath: String, renamed: VideoFile) {
         scope.launch(serial) {
+            // A lagging MediaStore still lists the old name: it mustn't come back as a broken row.
+            removed += oldPath
+            removed -= renamed.path
             val folders = s.folders.map { f ->
                 val i = f.videos.indexOfFirst { it.path == oldPath }
                 if (i < 0) f else VideoFolder(f.path, f.videos.toMutableList().also { it[i] = renamed })
@@ -410,29 +414,43 @@ class LibraryRepository @Inject constructor(
 
     private fun isTombstoned(path: String) = path in pendingDeletes || path in removed
 
-    private fun isRemoved(path: String) = path in pendingDeletes || (path in removed && !File(path).exists())
+    /** Of [paths], those whose file exists. On IO: [serial] must never wait on disk (slow SD cards). */
+    private suspend fun existing(paths: Collection<String>): Set<String> =
+        if (paths.isEmpty()) emptySet() else withContext(Dispatchers.IO) { paths.filterTo(HashSet()) { File(it).exists() } }
 
-    /** [folders] minus the videos the user just deleted, moved or vaulted. */
-    private fun withoutRemoved(folders: List<VideoFolder>): List<VideoFolder> {
+    /**
+     * [folders] minus the videos the user just deleted, moved, renamed or vaulted. The file checks
+     * run first, off [serial]; the filter itself uses the tombstones as they are afterwards, so a
+     * delete that started meanwhile is still honoured.
+     */
+    private suspend fun withoutRemoved(folders: List<VideoFolder>): List<VideoFolder> {
         if (pendingDeletes.isEmpty() && removed.isEmpty()) return folders
+        val candidates = folders.flatMap { f -> f.videos.filter { it.path in removed }.map { it.path } }
+        val back = existing(candidates)
         return folders.mapNotNull { f ->
             if (f.videos.none { isTombstoned(it.path) }) return@mapNotNull f
-            val kept = f.videos.filterNot { isRemoved(it.path) }
+            val kept = f.videos.filterNot { it.path in pendingDeletes || (it.path in removed && it.path !in back) }
             if (kept.isEmpty()) null else VideoFolder(f.path, kept)
         }
     }
 
     /** Forgets finished removals that MediaStore has caught up with, and paths whose file is back. */
-    private fun pruneTombstones(indexed: List<VideoFile>) {
+    private suspend fun pruneTombstones(indexed: List<VideoFile>) {
         if (removed.isEmpty()) return
+        val snapshot = removed.toList()
         val listed = indexed.asSequence().map { it.path }.filter { it in removed }.toHashSet()
-        removed.removeAll { it !in listed || File(it).exists() }
+        val back = existing(listed)
+        // Only the paths checked: one tombstoned during the IO hop stays.
+        snapshot.forEach { if (it !in listed || it in back) removed.remove(it) }
     }
 
     private suspend fun showCache(cached: List<VideoFolder>, roots: List<String>) {
         // A removed SD card's folders shouldn't show up (Flutter's FIX #SDCARD).
-        val valid = cached.filter { f -> roots.any { f.path.startsWith(it) } }
-        val newPaths = LibraryGrouping.cachedBadges(valid, loadSeen(), sessionSeen)
+        val inRoots = cached.filter { f -> roots.any { f.path.startsWith(it) } }
+        val seen = loadSeen()
+        // The saved library can predate a delete whose cache write is still on its way.
+        val valid = withoutRemoved(inRoots)
+        val newPaths = LibraryGrouping.cachedBadges(valid, seen, sessionSeen)
         _state.update { it.copy(folders = valid, fromCache = true, storageRoots = roots, newPaths = newPaths, hasLoaded = true) }
     }
 

@@ -317,11 +317,25 @@ class MpvEngine(private val context: Context) : PlayerEngine, MPVLib.EventObserv
         emit(EngineEvent.Tracks(TrackSnapshot(audio, subs, activeAudio, activeSub)))
     }
 
-    private var mpvDrawsSubtitles = false
+    private var imageSubSelected = false
+    private var inPip = false
+    private var subVisible = false
 
     private fun setMpvDrawsSubtitles(on: Boolean) {
-        if (on == mpvDrawsSubtitles) return
-        mpvDrawsSubtitles = on
+        imageSubSelected = on
+        updateSubVisibility()
+    }
+
+    override fun setPictureInPicture(pip: Boolean) {
+        inPip = pip
+        updateSubVisibility()
+    }
+
+    private fun updateSubVisibility() {
+        if (released) return
+        val on = imageSubSelected && !inPip
+        if (on == subVisible) return
+        subVisible = on
         runCatching { mpv.setPropertyBoolean("sub-visibility", on) }
     }
 

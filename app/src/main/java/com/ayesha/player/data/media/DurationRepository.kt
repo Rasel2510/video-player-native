@@ -113,8 +113,7 @@ class DurationRepository @Inject constructor(
         return probeSlots.withPermit {
             try {
                 val d = readHeaderDuration(path) ?: softwareProbe.probeDuration(path)
-                // Re-checked: a file deleted mid-probe mustn't get its row written back.
-                if (d != null && d.isPositive() && File(path).exists()) save(path, d)
+                if (d != null && d.isPositive()) save(path, d)
                 d
             } catch (_: Exception) {
                 null
@@ -142,8 +141,12 @@ class DurationRepository @Inject constructor(
     suspend fun save(path: String, duration: Duration) {
         val ms = duration.inWholeMilliseconds
         if (ms <= 0) return
-        mem[path] = ms
-        withContext(Dispatchers.IO) { dao.upsert(DurationEntity(path, ms)) }
+        withContext(Dispatchers.IO) {
+            // A file deleted while playing (or mid-probe) must not get its row written back.
+            if (path.startsWith('/') && !File(path).exists()) return@withContext
+            mem[path] = ms
+            dao.upsert(DurationEntity(path, ms))
+        }
     }
 
     suspend fun remove(path: String) {

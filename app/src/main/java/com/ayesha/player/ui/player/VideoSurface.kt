@@ -55,22 +55,27 @@ fun fitVideo(fit: FitMode, videoW: Float, videoH: Float, boxW: Float, boxH: Floa
 
 /**
  * Image subtitles placed as Media3's SubtitlePainter places them, in this box's coordinates
- * (the video's displayed area).
+ * relative to the video's displayed area ([videoWidth] x [videoHeight], centred in this layer,
+ * may be larger than it when zoomed or cropped), then kept inside the visible screen.
  */
 @Composable
-private fun BitmapCueLayer(cues: List<BitmapCue>) {
+private fun BitmapCueLayer(cues: List<BitmapCue>, videoWidth: Dp, videoHeight: Dp) {
     if (cues.isEmpty()) return
     val density = LocalDensity.current
     BoxWithConstraints(Modifier.fillMaxSize()) {
-        val boxW = constraints.maxWidth.toFloat()
-        val boxH = constraints.maxHeight.toFloat()
+        val screenW = constraints.maxWidth.toFloat()
+        val screenH = constraints.maxHeight.toFloat()
+        val boxW = with(density) { videoWidth.toPx() }
+        val boxH = with(density) { videoHeight.toPx() }
+        val left = (screenW - boxW) / 2
+        val top = (screenH - boxH) / 2
         for (cue in cues) {
             key(cue) {
                 val image = remember(cue.bitmap) { cue.bitmap.asImageBitmap() }
                 val w = boxW * cue.size
                 val h = cue.height?.let { boxH * it } ?: (w * cue.bitmap.height / cue.bitmap.width)
-                val x = anchored(boxW * cue.position, w, cue.positionAnchor)
-                val y = anchored(boxH * cue.line, h, cue.lineAnchor)
+                val x = (left + anchored(boxW * cue.position, w, cue.positionAnchor)).coerceIn(0f, (screenW - w).coerceAtLeast(0f))
+                val y = (top + anchored(boxH * cue.line, h, cue.lineAnchor)).coerceIn(0f, (screenH - h).coerceAtLeast(0f))
                 Image(
                     image,
                     contentDescription = null,
@@ -216,8 +221,6 @@ fun VideoSurface(
                 },
                 onRelease = { v -> handle?.let { if (it.view === v) it.view = null } },
             )
-            // Before the frozen still, which then covers them during the exit animation.
-            BitmapCueLayer(bitmapCues)
             if (handle != null && handle.frozen) {
                 // Drawn over the SurfaceView's hole, so the window shows this instead of the video.
                 val still = handle.frame
@@ -228,5 +231,8 @@ fun VideoSurface(
                 }
             }
         }
+        // Against the screen, not inside the (possibly zoomed, overflowing) video box, so a cue
+        // can't end up clipped off screen. Hidden under the exit animation's still.
+        if (handle?.frozen != true) BitmapCueLayer(bitmapCues, Dp(w * zoom), Dp(h * zoom))
     }
 }
